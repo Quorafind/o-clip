@@ -208,13 +208,6 @@ impl App {
                 if info.raw_data.is_none() {
                     self.status_message =
                         Some("Image too large, raw data was not stored".to_string());
-                } else if cfg!(target_os = "windows")
-                    && matches!(info.format, crate::clipboard::content::ImageFormat::Png)
-                {
-                    // PNG registered format is not recognised by most Windows
-                    // apps.  New captures use DIB; old entries may be PNG.
-                    self.status_message =
-                        Some("Legacy PNG entry, cannot restore (recopy the image)".to_string());
                 } else {
                     crate::clipboard::mark_self_write();
                     if set_clipboard_image(info) {
@@ -366,6 +359,46 @@ fn set_clipboard_files(_paths: &[std::path::PathBuf]) -> bool {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
+fn png_to_dib(png_bytes: &[u8]) -> Option<Vec<u8>> {
+    use image::GenericImageView;
+    let img = image::load_from_memory(png_bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let (w, h) = img.dimensions();
+
+    // Build BITMAPINFOHEADER (40 bytes) + bottom-up BGRA pixel data
+    let row_size = (w as usize) * 4;
+    let pixel_data_size = row_size * (h as usize);
+    let header_size: u32 = 40;
+    let mut dib = Vec::with_capacity(header_size as usize + pixel_data_size);
+
+    // BITMAPINFOHEADER
+    dib.extend_from_slice(&header_size.to_le_bytes()); // biSize
+    dib.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth
+    dib.extend_from_slice(&(h as i32).to_le_bytes()); // biHeight (positive = bottom-up)
+    dib.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+    dib.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biCompression (BI_RGB)
+    dib.extend_from_slice(&(pixel_data_size as u32).to_le_bytes()); // biSizeImage
+    dib.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerMeter
+    dib.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerMeter
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
+
+    // Pixel data: bottom-up rows, BGRA order
+    for y in (0..h).rev() {
+        for x in 0..w {
+            let px = rgba.get_pixel(x, y);
+            dib.push(px[2]); // B
+            dib.push(px[1]); // G
+            dib.push(px[0]); // R
+            dib.push(px[3]); // A
+        }
+    }
+
+    Some(dib)
+}
+
+#[cfg(target_os = "windows")]
 fn set_clipboard_image(info: &crate::clipboard::content::ImageInfo) -> bool {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
@@ -385,14 +418,22 @@ fn set_clipboard_image(info: &crate::clipboard::content::ImageInfo) -> bool {
         Err(_) => return false,
     };
 
-    // Only DIB formats are supported for restore; PNG entries are rejected
-    // by the caller because most Windows apps cannot paste from registered
-    // "PNG" format.
-    let format: u32 = match info.format {
-        crate::clipboard::content::ImageFormat::DibV5 => CF_DIBV5.0 as u32,
+    // For PNG entries (e.g. from macOS), convert to DIB so Windows apps can paste.
+    let (format, dib_bytes): (u32, std::borrow::Cow<[u8]>) = match info.format {
+        crate::clipboard::content::ImageFormat::DibV5 => {
+            (CF_DIBV5.0 as u32, std::borrow::Cow::Borrowed(&bytes))
+        }
         crate::clipboard::content::ImageFormat::Dib
-        | crate::clipboard::content::ImageFormat::Bitmap => CF_DIB.0 as u32,
-        crate::clipboard::content::ImageFormat::Png => return false,
+        | crate::clipboard::content::ImageFormat::Bitmap => {
+            (CF_DIB.0 as u32, std::borrow::Cow::Borrowed(&bytes))
+        }
+        crate::clipboard::content::ImageFormat::Png => match png_to_dib(&bytes) {
+            Some(dib) => (CF_DIB.0 as u32, std::borrow::Cow::Owned(dib)),
+            None => {
+                tracing::warn!("failed to convert PNG to DIB for clipboard");
+                return false;
+            }
+        },
     };
 
     unsafe {
@@ -401,7 +442,7 @@ fn set_clipboard_image(info: &crate::clipboard::content::ImageInfo) -> bool {
         }
         let _ = EmptyClipboard();
 
-        let hmem = match GlobalAlloc(GMEM_MOVEABLE, bytes.len()) {
+        let hmem = match GlobalAlloc(GMEM_MOVEABLE, dib_bytes.len()) {
             Ok(h) => h,
             Err(_) => {
                 let _ = CloseClipboard();
@@ -415,7 +456,7 @@ fn set_clipboard_image(info: &crate::clipboard::content::ImageInfo) -> bool {
             return false;
         }
 
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+        std::ptr::copy_nonoverlapping(dib_bytes.as_ptr(), ptr, dib_bytes.len());
         let _ = GlobalUnlock(hmem);
 
         let result = SetClipboardData(format, Some(HANDLE(hmem.0)));
