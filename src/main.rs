@@ -20,17 +20,22 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use app::{App, Mode};
+use clap::Parser;
 #[cfg(target_os = "windows")]
 use clipboard::ClipboardMonitor;
 use clipboard::monitor::ClipboardEvent;
-use config::Config;
+use config::{Cli, Config};
 use store::{ClipboardEntry, EntrySource, Store};
 use sync::SyncEvent;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load configuration
-    let config = Config::load();
-    Config::write_default_if_missing(&Config::config_path());
+    // Parse CLI arguments and load configuration
+    let cli = Cli::parse();
+    let config = Config::load(cli.config.as_deref());
+    // Only write default config if no custom path was specified
+    if cli.config.is_none() {
+        Config::write_default_if_missing(&Config::config_path());
+    }
 
     // Set up file-based logging (TUI owns stdout)
     let log_dir = directories::ProjectDirs::from("", "", "o-clip")

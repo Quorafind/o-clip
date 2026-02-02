@@ -1,6 +1,15 @@
 use std::path::{Path, PathBuf};
 
+use clap::Parser;
 use serde::{Deserialize, Serialize};
+
+#[derive(Parser)]
+#[command(name = "o-clip", about = "Clipboard manager with intranet sync")]
+pub struct Cli {
+    /// Path to config file (overrides default location)
+    #[arg(short, long)]
+    pub config: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -82,9 +91,13 @@ fn default_max_entries() -> usize {
 }
 
 impl Config {
-    /// Load config from the standard path, or return defaults if not found.
-    pub fn load() -> Self {
-        let path = Self::config_path();
+    /// Load config from the given path (or the standard path if `None`).
+    /// Returns defaults if the file does not exist or cannot be parsed.
+    pub fn load(override_path: Option<&Path>) -> Self {
+        let path = match override_path {
+            Some(p) => p.to_path_buf(),
+            None => Self::config_path(),
+        };
         if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => match toml::from_str(&contents) {
