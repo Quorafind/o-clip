@@ -498,11 +498,9 @@ fn set_clipboard_text(text: &str) -> bool {
             objc2::class!(NSString),
             stringWithUTF8String: cstr.as_ptr()
         ];
-        let result: bool = objc2::msg_send![&*pasteboard, setString: &*nsstring, forType: {
-            let t: objc2::rc::Retained<objc2::runtime::AnyObject> =
-                objc2::msg_send_id![objc2::class!(NSString), stringWithUTF8String: b"public.utf8-plain-text\0".as_ptr()];
-            &*t
-        }];
+        let pasteboard_type: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send_id![objc2::class!(NSString), stringWithUTF8String: b"public.utf8-plain-text\0".as_ptr()];
+        let result: bool =
+            objc2::msg_send![&*pasteboard, setString: &*nsstring, forType: &*pasteboard_type];
         result
     }
 }
