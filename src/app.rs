@@ -208,7 +208,9 @@ impl App {
                 if info.raw_data.is_none() {
                     self.status_message =
                         Some("Image too large, raw data was not stored".to_string());
-                } else if matches!(info.format, crate::clipboard::content::ImageFormat::Png) {
+                } else if cfg!(target_os = "windows")
+                    && matches!(info.format, crate::clipboard::content::ImageFormat::Png)
+                {
                     // PNG registered format is not recognised by most Windows
                     // apps.  New captures use DIB; old entries may be PNG.
                     self.status_message =
@@ -423,10 +425,59 @@ fn set_clipboard_image(info: &crate::clipboard::content::ImageInfo) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn set_clipboard_image(_info: &crate::clipboard::content::ImageInfo) -> bool {
-    // TODO: implement macOS image clipboard write via NSPasteboard
-    tracing::warn!("clipboard image write not yet supported on macOS");
-    false
+fn set_clipboard_image(info: &crate::clipboard::content::ImageInfo) -> bool {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let raw_b64 = match &info.raw_data {
+        Some(d) => d,
+        None => return false,
+    };
+    let png_bytes = match BASE64.decode(raw_b64) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+
+    // For non-PNG formats, convert via the `image` crate to PNG bytes first
+    let png_data = match info.format {
+        crate::clipboard::content::ImageFormat::Png => png_bytes,
+        _ => {
+            // Use ImageInfo::to_dynamic_image() which handles DIB/BMP conversion
+            let dyn_img = match info.to_dynamic_image() {
+                Some(img) => img,
+                None => return false,
+            };
+            let mut buf = Vec::new();
+            if dyn_img
+                .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                .is_err()
+            {
+                return false;
+            }
+            buf
+        }
+    };
+
+    unsafe {
+        let pasteboard: objc2::rc::Retained<objc2::runtime::AnyObject> =
+            objc2::msg_send![objc2::class!(NSPasteboard), generalPasteboard];
+        let _: () = objc2::msg_send![&*pasteboard, clearContents];
+
+        // Create NSData from PNG bytes
+        let nsdata: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![
+            objc2::class!(NSData),
+            dataWithBytes: png_data.as_ptr(),
+            length: png_data.len()
+        ];
+
+        // Set as public.png
+        let png_type: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![
+            objc2::class!(NSString),
+            stringWithUTF8String: b"public.png\0".as_ptr()
+        ];
+        let result: bool = objc2::msg_send![&*pasteboard, setData: &*nsdata, forType: &*png_type];
+        result
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]

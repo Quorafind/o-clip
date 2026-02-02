@@ -2,3 +2,4 @@
 .claude
 target
 *.tar
+.ace-tool/

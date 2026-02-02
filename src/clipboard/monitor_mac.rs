@@ -18,12 +18,18 @@ mod inner {
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
 
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
     use crate::clipboard::content::{ClipboardContent, ImageFormat, ImageInfo, classify_text};
 
     use crate::clipboard::ClipboardEvent;
 
     /// Poll interval for clipboard changes.
     const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+    /// Maximum raw image data size we'll store (10 MB).
+    const MAX_IMAGE_STORE_SIZE: usize = 10 * 1024 * 1024;
 
     /// Sensitivity check result (mirrors Windows `SensitivityInfo` semantics).
     #[derive(Debug, Clone, Copy)]
@@ -152,29 +158,29 @@ mod inner {
                     }
                 }
 
-                // Try to read image (NSImage from pasteboard)
-                let tiff_type: Retained<AnyObject> =
-                    msg_send![class!(NSString), stringWithUTF8String: b"public.tiff\0".as_ptr()];
-                let png_type: Retained<AnyObject> =
-                    msg_send![class!(NSString), stringWithUTF8String: b"public.png\0".as_ptr()];
-                let type_arr: Retained<AnyObject> =
-                    msg_send![class!(NSArray), arrayWithObject: &*tiff_type];
-                let type_arr: Retained<AnyObject> =
-                    msg_send![&*type_arr, arrayByAddingObject: &*png_type];
-                let image_types: Option<Retained<AnyObject>> = msg_send![
-                    &*pasteboard,
-                    availableTypeFromArray: &*type_arr
-                ];
+                // Try to read image data from pasteboard.
+                // Strategy: prefer PNG data directly; fall back to TIFF and
+                // convert to PNG via NSBitmapImageRep.
+                if let Some(png_bytes) = read_image_as_png(&pasteboard) {
+                    let data_size = png_bytes.len();
+                    tracing::debug!("macOS: captured image ({} bytes PNG)", data_size);
 
-                if image_types.is_some() {
-                    tracing::debug!("macOS: captured image from pasteboard");
+                    // Parse PNG IHDR for dimensions
+                    let (width, height, bits_per_pixel) = parse_png_ihdr(&png_bytes);
+
+                    let raw_data = if data_size <= MAX_IMAGE_STORE_SIZE {
+                        Some(BASE64.encode(&png_bytes))
+                    } else {
+                        None
+                    };
+
                     let content = ClipboardContent::Image(ImageInfo {
-                        width: 0,
-                        height: 0,
-                        bits_per_pixel: 0,
-                        data_size: 0,
+                        width,
+                        height,
+                        bits_per_pixel,
+                        data_size,
                         format: ImageFormat::Png,
-                        raw_data: None,
+                        raw_data,
                     });
                     let event = ClipboardEvent {
                         content,
@@ -192,6 +198,83 @@ mod inner {
         }
 
         tracing::info!("macOS clipboard monitor stopped");
+    }
+
+    /// Read image data from NSPasteboard and return it as PNG bytes.
+    ///
+    /// Tries `public.png` first. If unavailable, reads `public.tiff` and
+    /// converts to PNG using NSBitmapImageRep.
+    unsafe fn read_image_as_png(pasteboard: &AnyObject) -> Option<Vec<u8>> {
+        // 1. Try PNG directly
+        let png_type: Retained<AnyObject> =
+            msg_send![class!(NSString), stringWithUTF8String: b"public.png\0".as_ptr()];
+        let png_data: Option<Retained<AnyObject>> = msg_send![pasteboard, dataForType: &*png_type];
+
+        if let Some(data) = png_data {
+            let length: usize = msg_send![&*data, length];
+            if length > 0 {
+                let bytes_ptr: *const u8 = msg_send![&*data, bytes];
+                let bytes = std::slice::from_raw_parts(bytes_ptr, length);
+                return Some(bytes.to_vec());
+            }
+        }
+
+        // 2. Try TIFF and convert to PNG via NSBitmapImageRep
+        let tiff_type: Retained<AnyObject> =
+            msg_send![class!(NSString), stringWithUTF8String: b"public.tiff\0".as_ptr()];
+        let tiff_data: Option<Retained<AnyObject>> =
+            msg_send![pasteboard, dataForType: &*tiff_type];
+
+        if let Some(data) = tiff_data {
+            let length: usize = msg_send![&*data, length];
+            if length > 0 {
+                // NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithData:tiffData];
+                let rep: Option<Retained<AnyObject>> =
+                    msg_send![class!(NSBitmapImageRep), imageRepWithData: &*data];
+                if let Some(rep) = rep {
+                    // NSBitmapImageFileType: PNG = 4
+                    let file_type_png: usize = 4;
+                    let properties: Retained<AnyObject> =
+                        msg_send![class!(NSDictionary), dictionary];
+                    let png_data: Option<Retained<AnyObject>> = msg_send![
+                        &*rep,
+                        representationUsingType: file_type_png,
+                        properties: &*properties
+                    ];
+                    if let Some(png_data) = png_data {
+                        let png_len: usize = msg_send![&*png_data, length];
+                        if png_len > 0 {
+                            let png_ptr: *const u8 = msg_send![&*png_data, bytes];
+                            let png_bytes = std::slice::from_raw_parts(png_ptr, png_len);
+                            return Some(png_bytes.to_vec());
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Parse PNG IHDR chunk to extract width, height, and bits per pixel.
+    /// Returns (width, height, bits_per_pixel). Falls back to (0, 0, 0) on failure.
+    fn parse_png_ihdr(data: &[u8]) -> (u32, u32, u16) {
+        // PNG: 8-byte signature + 4 chunk_len + 4 "IHDR" + 4 width + 4 height + 1 bit_depth + 1 color_type
+        if data.len() < 26 {
+            return (0, 0, 0);
+        }
+        let width = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+        let height = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+        let bit_depth = data[24] as u16;
+        let color_type = data[25];
+        let channels: u16 = match color_type {
+            0 => 1, // grayscale
+            2 => 3, // RGB
+            4 => 2, // grayscale + alpha
+            6 => 4, // RGBA
+            _ => 1,
+        };
+        (width, height, bit_depth * channels)
     }
 }
 
