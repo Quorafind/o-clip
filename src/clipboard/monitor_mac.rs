@@ -4,6 +4,10 @@
 /// AddClipboardFormatListener. Instead we poll NSPasteboard.changeCount
 /// on a timer. Apple's recommended approach for non-foreground apps.
 #[cfg(target_os = "macos")]
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {}
+
+#[cfg(target_os = "macos")]
 mod inner {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
