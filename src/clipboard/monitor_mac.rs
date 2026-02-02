@@ -1,11 +1,11 @@
-/// macOS clipboard monitor using NSPasteboard polling.
-///
-/// macOS does not have a push-based clipboard listener like Windows'
-/// AddClipboardFormatListener. Instead we poll NSPasteboard.changeCount
-/// on a timer. Apple's recommended approach for non-foreground apps.
+// macOS clipboard monitor using NSPasteboard polling.
+//
+// macOS does not have a push-based clipboard listener like Windows'
+// AddClipboardFormatListener. Instead we poll NSPasteboard.changeCount
+// on a timer. Apple's recommended approach for non-foreground apps.
 #[cfg(target_os = "macos")]
 #[link(name = "AppKit", kind = "framework")]
-extern "C" {}
+unsafe extern "C" {}
 
 #[cfg(target_os = "macos")]
 mod inner {
@@ -16,7 +16,7 @@ mod inner {
 
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::AnyObject;
-    use objc2::{ClassType, class, msg_send, msg_send_id};
+    use objc2::{class, msg_send};
 
     use crate::clipboard::content::{ClipboardContent, ImageFormat, ImageInfo, classify_text};
 
@@ -52,15 +52,13 @@ mod inner {
             };
 
             unsafe {
-                let types: Option<Retained<AnyObject>> = msg_send_id![pasteboard, types];
+                let types: Option<Retained<AnyObject>> = msg_send![pasteboard, types];
                 if let Some(types) = types {
                     let count: usize = msg_send![&*types, count];
                     for i in 0..count {
-                        let uti: Option<Retained<AnyObject>> =
-                            msg_send_id![&*types, objectAtIndex: i];
+                        let uti: Option<Retained<AnyObject>> = msg_send![&*types, objectAtIndex: i];
                         if let Some(uti) = uti {
-                            let desc: Option<Retained<AnyObject>> =
-                                msg_send_id![&*uti, description];
+                            let desc: Option<Retained<AnyObject>> = msg_send![&*uti, description];
                             if let Some(desc) = desc {
                                 let cstr: *const std::ffi::c_char = msg_send![&*desc, UTF8String];
                                 if !cstr.is_null() {
@@ -95,7 +93,7 @@ mod inner {
         tracing::info!("macOS clipboard monitor started");
 
         let pasteboard: Retained<AnyObject> =
-            unsafe { msg_send_id![class!(NSPasteboard), generalPasteboard] };
+            unsafe { msg_send![class!(NSPasteboard), generalPasteboard] };
         let mut last_change_count: i64 = unsafe { msg_send![&*pasteboard, changeCount] };
 
         while !stop.load(Ordering::Relaxed) {
@@ -119,12 +117,12 @@ mod inner {
                 }
 
                 // Try to read string content
-                let nsstring_class: Retained<AnyObject> = msg_send_id![class!(NSString), class];
+                let nsstring_class: Retained<AnyObject> = msg_send![class!(NSString), class];
                 let classes: Retained<AnyObject> =
-                    msg_send_id![class!(NSArray), arrayWithObject: &*nsstring_class];
-                let options: Retained<AnyObject> = msg_send_id![class!(NSDictionary), dictionary];
+                    msg_send![class!(NSArray), arrayWithObject: &*nsstring_class];
+                let options: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
 
-                let objects: Option<Retained<AnyObject>> = msg_send_id![
+                let objects: Option<Retained<AnyObject>> = msg_send![
                     &*pasteboard,
                     readObjectsForClasses: &*classes,
                     options: &*options
@@ -134,7 +132,7 @@ mod inner {
                     let count: usize = msg_send![&*objects, count];
                     if count > 0 {
                         let first: Retained<AnyObject> =
-                            msg_send_id![&*objects, objectAtIndex: 0usize];
+                            msg_send![&*objects, objectAtIndex: 0usize];
                         let cstr: *const std::ffi::c_char = msg_send![&*first, UTF8String];
                         if !cstr.is_null() {
                             let text = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
@@ -156,14 +154,14 @@ mod inner {
 
                 // Try to read image (NSImage from pasteboard)
                 let tiff_type: Retained<AnyObject> =
-                    msg_send_id![class!(NSString), stringWithUTF8String: b"public.tiff\0".as_ptr()];
+                    msg_send![class!(NSString), stringWithUTF8String: b"public.tiff\0".as_ptr()];
                 let png_type: Retained<AnyObject> =
-                    msg_send_id![class!(NSString), stringWithUTF8String: b"public.png\0".as_ptr()];
+                    msg_send![class!(NSString), stringWithUTF8String: b"public.png\0".as_ptr()];
                 let type_arr: Retained<AnyObject> =
-                    msg_send_id![class!(NSArray), arrayWithObject: &*tiff_type];
+                    msg_send![class!(NSArray), arrayWithObject: &*tiff_type];
                 let type_arr: Retained<AnyObject> =
-                    msg_send_id![&*type_arr, arrayByAddingObject: &*png_type];
-                let image_types: Option<Retained<AnyObject>> = msg_send_id![
+                    msg_send![&*type_arr, arrayByAddingObject: &*png_type];
+                let image_types: Option<Retained<AnyObject>> = msg_send![
                     &*pasteboard,
                     availableTypeFromArray: &*type_arr
                 ];

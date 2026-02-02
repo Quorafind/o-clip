@@ -487,18 +487,18 @@ fn set_clipboard_text(text: &str) -> bool {
     use std::ffi::CString;
     unsafe {
         let pasteboard: objc2::rc::Retained<objc2::runtime::AnyObject> =
-            objc2::msg_send_id![objc2::class!(NSPasteboard), generalPasteboard];
+            objc2::msg_send![objc2::class!(NSPasteboard), generalPasteboard];
         let _: () = objc2::msg_send![&*pasteboard, clearContents];
 
         let cstr = match CString::new(text) {
             Ok(c) => c,
             Err(_) => return false,
         };
-        let nsstring: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send_id![
+        let nsstring: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![
             objc2::class!(NSString),
             stringWithUTF8String: cstr.as_ptr()
         ];
-        let pasteboard_type: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send_id![objc2::class!(NSString), stringWithUTF8String: b"public.utf8-plain-text\0".as_ptr()];
+        let pasteboard_type: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![objc2::class!(NSString), stringWithUTF8String: b"public.utf8-plain-text\0".as_ptr()];
         let result: bool =
             objc2::msg_send![&*pasteboard, setString: &*nsstring, forType: &*pasteboard_type];
         result
