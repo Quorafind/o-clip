@@ -3,9 +3,16 @@ name = "o-clip-server"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["tls"]
+tls = ["dep:axum-server", "dep:rustls", "dep:rustls-pemfile"]
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
+rustls = { version = "0.23", optional = true }
+rustls-pemfile = { version = "2", optional = true }
 tower-http = { version = "0.6", features = ["cors"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

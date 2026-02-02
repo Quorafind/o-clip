@@ -24,6 +24,10 @@ pub struct ServerConfig {
     /// This prevents multi-GB file copies from being transmitted over the network.
     #[serde(default = "default_max_sync_size")]
     pub max_sync_size: usize,
+    /// Accept invalid/self-signed TLS certificates when using `wss://`.
+    /// Only enable this for LAN deployments with self-signed certificates.
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +55,7 @@ impl Default for ServerConfig {
             url: String::new(),
             auto_connect: true,
             max_sync_size: default_max_sync_size(),
+            accept_invalid_certs: false,
         }
     }
 }

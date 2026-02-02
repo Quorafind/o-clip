@@ -104,7 +104,31 @@ async fn main() {
 
     // Bind and serve
     let addr: SocketAddr = config.listen.parse().expect("invalid listen address");
-    tracing::info!("o-clip-server listening on {addr}");
+
+    #[cfg(feature = "tls")]
+    if let Some((cert_path, key_path)) = config.tls_paths() {
+        tracing::info!(
+            "TLS enabled: cert={}, key={}",
+            cert_path.display(),
+            key_path.display()
+        );
+        tracing::info!("o-clip-server listening on {addr} (wss)");
+
+        let rustls_config =
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+                .await
+                .expect("failed to load TLS cert/key");
+
+        axum_server::bind_rustls(addr, rustls_config)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .expect("server error");
+
+        tracing::info!("server shut down");
+        return;
+    }
+
+    tracing::info!("o-clip-server listening on {addr} (ws, no TLS)");
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await

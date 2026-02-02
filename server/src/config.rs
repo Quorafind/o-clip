@@ -36,6 +36,15 @@ pub struct ServerConfig {
     #[serde(default = "default_max_msg_size")]
     pub rate_limit_max_message_size: usize,
 
+    /// Path to TLS certificate PEM file. When both `tls_cert` and `tls_key`
+    /// are set, the server listens with TLS (wss://). Otherwise plain ws://.
+    #[serde(default)]
+    pub tls_cert: Option<String>,
+
+    /// Path to TLS private key PEM file.
+    #[serde(default)]
+    pub tls_key: Option<String>,
+
     /// Resolved directory of the config file (not serialized).
     #[serde(skip)]
     pub config_dir: PathBuf,
@@ -74,6 +83,8 @@ impl Default for ServerConfig {
             rate_limit_messages: default_rate_msg(),
             rate_limit_bytes: default_rate_bytes(),
             rate_limit_max_message_size: default_max_msg_size(),
+            tls_cert: None,
+            tls_key: None,
             config_dir: PathBuf::from("."),
         }
     }
@@ -126,6 +137,24 @@ impl ServerConfig {
             self.config_dir.join("clipboard_server.db")
         } else {
             PathBuf::from(&self.db_path)
+        }
+    }
+
+    /// Resolve TLS cert and key paths. Returns `Some((cert, key))` when both are configured.
+    pub fn tls_paths(&self) -> Option<(PathBuf, PathBuf)> {
+        match (&self.tls_cert, &self.tls_key) {
+            (Some(cert), Some(key)) => {
+                let resolve = |p: &str| {
+                    let path = PathBuf::from(p);
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        self.config_dir.join(path)
+                    }
+                };
+                Some((resolve(cert), resolve(key)))
+            }
+            _ => None,
         }
     }
 

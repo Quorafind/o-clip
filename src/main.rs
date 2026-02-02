@@ -65,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn tokio runtime for WebSocket sync
     let ws_url = config.server.url.clone();
+    let accept_invalid_certs = config.server.accept_invalid_certs;
     let has_server = config.has_server() && config.server.auto_connect;
     let _rt_handle = std::thread::spawn(move || {
         if !has_server {
@@ -75,7 +76,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .worker_threads(1)
             .build()
             .expect("failed to build tokio runtime");
-        rt.block_on(sync::run_sync(ws_url, ws_outbound_rx, ws_event_tx));
+        rt.block_on(sync::run_sync(
+            ws_url,
+            accept_invalid_certs,
+            ws_outbound_rx,
+            ws_event_tx,
+        ));
     });
 
     // Query the terminal for graphics protocol support (must happen before
