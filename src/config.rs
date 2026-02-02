@@ -13,7 +13,7 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     /// WebSocket URL for the intranet sync server. Empty means no sync.
-    /// Example: "ws://192.168.1.100:8080/ws"
+    /// Example: "ws://192.168.1.100:9217/ws"
     #[serde(default)]
     pub url: String,
     /// Whether to automatically connect on startup.

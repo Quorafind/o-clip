@@ -11,7 +11,7 @@ use windows::core::w;
 
 use crate::error::{ClipboardError, Result};
 
-const CLASS_NAME: windows::core::PCWSTR = w!("FastCopyClipboardMonitor");
+const CLASS_NAME: windows::core::PCWSTR = w!("OClipClipboardMonitor");
 
 type WndProcHandler = dyn FnMut(HWND, u32, WPARAM, LPARAM) -> Option<LRESULT>;
 
@@ -94,7 +94,7 @@ pub fn create_hidden_window() -> Result<HWND> {
         let hwnd = CreateWindowExW(
             WS_EX_NOACTIVATE,
             CLASS_NAME,
-            w!("FastCopy Clipboard Monitor"),
+            w!("OClip Clipboard Monitor"),
             WINDOW_STYLE::default(),
             0,
             0,

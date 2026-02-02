@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// Listen address (e.g. "0.0.0.0:8080").
+    /// Listen address (e.g. "0.0.0.0:9217").
     #[serde(default = "default_listen")]
     pub listen: String,
 
@@ -51,7 +51,7 @@ pub struct ServerConfig {
 }
 
 fn default_listen() -> String {
-    "0.0.0.0:8080".to_string()
+    "0.0.0.0:9217".to_string()
 }
 fn default_max_entries() -> usize {
     50000
