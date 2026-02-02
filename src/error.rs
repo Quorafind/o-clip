@@ -2,6 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ClipboardError {
+    #[cfg(target_os = "windows")]
     #[error("failed to open clipboard: {0}")]
     OpenFailed(windows::core::Error),
 
@@ -11,12 +12,15 @@ pub enum ClipboardError {
     #[error("failed to lock global memory")]
     GlobalLockFailed,
 
+    #[cfg(target_os = "windows")]
     #[error("failed to register clipboard listener: {0}")]
     ListenerRegistrationFailed(windows::core::Error),
 
+    #[cfg(target_os = "windows")]
     #[error("failed to create hidden window: {0}")]
     WindowCreationFailed(windows::core::Error),
 
+    #[cfg(target_os = "windows")]
     #[error("windows API error: {0}")]
     Windows(#[from] windows::core::Error),
 }

@@ -16,7 +16,7 @@ mod inner {
 
     use crate::clipboard::content::{ClipboardContent, ImageFormat, ImageInfo, classify_text};
 
-    use super::super::monitor::ClipboardEvent;
+    use crate::clipboard::ClipboardEvent;
 
     /// Poll interval for clipboard changes.
     const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -166,6 +166,7 @@ mod inner {
                         bits_per_pixel: 0,
                         data_size: 0,
                         format: ImageFormat::Png,
+                        raw_data: None,
                     });
                     let event = ClipboardEvent {
                         content,

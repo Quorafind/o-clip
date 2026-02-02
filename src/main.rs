@@ -21,9 +21,9 @@ use ratatui::backend::CrosstermBackend;
 
 use app::{App, Mode};
 use clap::Parser;
+use clipboard::ClipboardEvent;
 #[cfg(target_os = "windows")]
 use clipboard::ClipboardMonitor;
-use clipboard::monitor::ClipboardEvent;
 use config::{Cli, Config};
 use store::{ClipboardEntry, EntrySource, Store};
 use sync::SyncEvent;

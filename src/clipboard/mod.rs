@@ -10,6 +10,14 @@ pub use content::ClipboardContent;
 #[cfg(target_os = "windows")]
 pub use monitor::ClipboardMonitor;
 
+/// Event sent from the clipboard monitor to the main thread.
+#[derive(Debug)]
+pub struct ClipboardEvent {
+    pub content: ClipboardContent,
+    /// Whether this content should NOT be synced to the cloud/server.
+    pub no_cloud: bool,
+}
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Flag to tell the clipboard monitor to skip the next change event.

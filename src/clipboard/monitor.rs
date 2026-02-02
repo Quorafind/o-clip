@@ -9,18 +9,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_CLIPBOARDUPDATE, WM_DESTROY,
 };
 
+use crate::clipboard::ClipboardEvent;
 use crate::clipboard::content::ClipboardContent;
 use crate::clipboard::reader::ClipboardGuard;
 use crate::error::{ClipboardError, Result};
 use crate::window;
-
-/// Event sent from the clipboard monitor to the main thread.
-#[derive(Debug)]
-pub struct ClipboardEvent {
-    pub content: ClipboardContent,
-    /// Whether this content should NOT be synced to the cloud/server.
-    pub no_cloud: bool,
-}
 
 /// Monitors the Windows clipboard for changes using AddClipboardFormatListener.
 pub struct ClipboardMonitor {
