@@ -10,7 +10,7 @@ mod inner {
     use std::sync::mpsc::Sender;
     use std::time::Duration;
 
-    use objc2::rc::Retained;
+    use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::AnyObject;
     use objc2::{ClassType, class, msg_send, msg_send_id};
 
@@ -88,25 +88,30 @@ mod inner {
 
     /// Run the macOS clipboard monitor loop. Blocks the calling thread.
     pub fn run_mac_monitor(tx: Sender<ClipboardEvent>, stop: Arc<AtomicBool>) {
-        unsafe {
-            let pasteboard: Retained<AnyObject> =
-                msg_send_id![class!(NSPasteboard), generalPasteboard];
-            let mut last_change_count: i64 = msg_send![&*pasteboard, changeCount];
+        tracing::info!("macOS clipboard monitor started");
 
-            while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(POLL_INTERVAL);
+        let pasteboard: Retained<AnyObject> =
+            unsafe { msg_send_id![class!(NSPasteboard), generalPasteboard] };
+        let mut last_change_count: i64 = unsafe { msg_send![&*pasteboard, changeCount] };
 
+        while !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(POLL_INTERVAL);
+
+            // Each iteration needs its own autorelease pool to drain
+            // temporary Objective-C objects created by msg_send calls.
+            let should_break = autoreleasepool(|_| unsafe {
                 let change_count: i64 = msg_send![&*pasteboard, changeCount];
                 if change_count == last_change_count {
-                    continue;
+                    return false;
                 }
                 last_change_count = change_count;
+                tracing::debug!("macOS: clipboard change detected (count: {change_count})");
 
                 // Check sensitivity
                 let sensitivity = SensitivityChecker::check(&pasteboard);
                 if sensitivity.exclude {
                     tracing::debug!("macOS: skipping concealed pasteboard content");
-                    continue;
+                    return false;
                 }
 
                 // Try to read string content
@@ -117,7 +122,7 @@ mod inner {
 
                 let objects: Option<Retained<AnyObject>> = msg_send_id![
                     &*pasteboard,
-                    readObjectsForClasses: &*classes
+                    readObjectsForClasses: &*classes,
                     options: &*options
                 ];
 
@@ -130,22 +135,22 @@ mod inner {
                         if !cstr.is_null() {
                             let text = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
                             if !text.is_empty() {
+                                tracing::debug!("macOS: captured text ({} bytes)", text.len());
                                 let content = classify_text(text);
                                 let event = ClipboardEvent {
                                     content,
                                     no_cloud: sensitivity.no_cloud,
                                 };
                                 if tx.send(event).is_err() {
-                                    break;
+                                    return true; // channel closed, break outer loop
                                 }
-                                continue;
+                                return false;
                             }
                         }
                     }
                 }
 
                 // Try to read image (NSImage from pasteboard)
-                // For now, we log that an image was detected but skip pixel data
                 let tiff_type: Retained<AnyObject> =
                     msg_send_id![class!(NSString), stringWithUTF8String: b"public.tiff\0".as_ptr()];
                 let png_type: Retained<AnyObject> =
@@ -160,6 +165,7 @@ mod inner {
                 ];
 
                 if image_types.is_some() {
+                    tracing::debug!("macOS: captured image from pasteboard");
                     let content = ClipboardContent::Image(ImageInfo {
                         width: 0,
                         height: 0,
@@ -174,8 +180,16 @@ mod inner {
                     };
                     let _ = tx.send(event);
                 }
+
+                false
+            });
+
+            if should_break {
+                break;
             }
         }
+
+        tracing::info!("macOS clipboard monitor stopped");
     }
 }
 
