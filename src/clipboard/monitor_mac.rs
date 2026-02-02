@@ -146,17 +146,17 @@ mod inner {
 
                 // Try to read image (NSImage from pasteboard)
                 // For now, we log that an image was detected but skip pixel data
+                let tiff_type: Retained<AnyObject> =
+                    msg_send_id![class!(NSString), stringWithUTF8String: b"public.tiff\0".as_ptr()];
+                let png_type: Retained<AnyObject> =
+                    msg_send_id![class!(NSString), stringWithUTF8String: b"public.png\0".as_ptr()];
+                let type_arr: Retained<AnyObject> =
+                    msg_send_id![class!(NSArray), arrayWithObject: &*tiff_type];
+                let type_arr: Retained<AnyObject> =
+                    msg_send_id![&*type_arr, arrayByAddingObject: &*png_type];
                 let image_types: Option<Retained<AnyObject>> = msg_send_id![
                     &*pasteboard,
-                    availableTypeFromArray: &*{
-                        let tiff: Retained<AnyObject> =
-                            msg_send_id![class!(NSString), stringWithUTF8String: b"public.tiff\0".as_ptr()];
-                        let png: Retained<AnyObject> =
-                            msg_send_id![class!(NSString), stringWithUTF8String: b"public.png\0".as_ptr()];
-                        let arr: Retained<AnyObject> =
-                            msg_send_id![class!(NSArray), arrayWithObjects: &*tiff, &*png, std::ptr::null::<AnyObject>()];
-                        arr
-                    }
+                    availableTypeFromArray: &*type_arr
                 ];
 
                 if image_types.is_some() {
