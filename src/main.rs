@@ -332,6 +332,11 @@ fn setup_ctrlc_handler() {
         let _ = io::stdout().execute(Clear(ClearType::All));
 
         signal_monitor_stop();
+
+        // On macOS the SIGINT handler intercepts Ctrl+C before crossterm
+        // can deliver it as a key event, so the main loop never sees it.
+        // Exit the process directly after cleanup.
+        std::process::exit(0);
     });
 }
 
