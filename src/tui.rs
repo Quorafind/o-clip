@@ -11,13 +11,15 @@ use crate::store::EntrySource;
 use crate::sync::ConnectionStatus;
 
 // -- Palette ----------------------------------------------------------------
-// Using RGB values for consistent appearance across terminals.
-const BORDER: Color = Color::Rgb(100, 100, 120); // muted blue-gray
-const BORDER_ACTIVE: Color = Color::Rgb(180, 160, 60); // gold (search mode)
-const TITLE_FG: Color = Color::Rgb(160, 170, 190); // light blue-gray
-const DIM: Color = Color::Rgb(90, 95, 105); // dim text
-const BAR_BG: Color = Color::Rgb(30, 32, 40); // dark bar background
-const HIGHLIGHT_BG: Color = Color::Rgb(45, 50, 70); // selection highlight
+// Using terminal theme colors so the app adapts to any color scheme.
+const BORDER: Color = Color::DarkGray;
+const BORDER_ACTIVE: Color = Color::Yellow;
+const TITLE_FG: Color = Color::Reset;
+const DIM: Color = Color::DarkGray;
+const DIM_BRIGHT: Color = Color::Gray;
+const BAR_BG: Color = Color::Indexed(236); // very dark gray (near-black)
+const HIGHLIGHT_BG: Color = Color::Indexed(238); // subtle dark highlight
+const PIN_FG: Color = Color::Yellow;
 
 /// Render the entire UI.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -37,14 +39,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
     let ws_indicator = match app.ws_status {
-        ConnectionStatus::Connected => Span::styled(
-            " [WS: Connected] ",
-            Style::default().fg(Color::Rgb(80, 200, 120)),
-        ),
-        ConnectionStatus::Connecting => Span::styled(
-            " [WS: Connecting...] ",
-            Style::default().fg(Color::Rgb(220, 180, 50)),
-        ),
+        ConnectionStatus::Connected => {
+            Span::styled(" [WS: Connected] ", Style::default().fg(Color::Green))
+        }
+        ConnectionStatus::Connecting => {
+            Span::styled(" [WS: Connecting...] ", Style::default().fg(Color::Yellow))
+        }
         ConnectionStatus::Disconnected => {
             Span::styled(" [WS: Disconnected] ", Style::default().fg(DIM))
         }
@@ -54,7 +54,7 @@ fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(
             " o-clip ",
             Style::default()
-                .fg(Color::Rgb(100, 200, 220))
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -90,11 +90,17 @@ fn render_list(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|entry| {
             let type_tag = match entry.content_type.as_str() {
-                "text" => Span::styled("[T] ", Style::default().fg(Color::Rgb(100, 150, 230))),
-                "url" => Span::styled("[U] ", Style::default().fg(Color::Rgb(180, 120, 200))),
-                "files" => Span::styled("[F] ", Style::default().fg(Color::Rgb(80, 200, 120))),
-                "image" => Span::styled("[I] ", Style::default().fg(Color::Rgb(220, 180, 50))),
+                "text" => Span::styled("[T] ", Style::default().fg(Color::Blue)),
+                "url" => Span::styled("[U] ", Style::default().fg(Color::Magenta)),
+                "files" => Span::styled("[F] ", Style::default().fg(Color::Green)),
+                "image" => Span::styled("[I] ", Style::default().fg(Color::Yellow)),
                 _ => Span::styled("[?] ", Style::default().fg(DIM)),
+            };
+
+            let pin_span = if entry.pinned {
+                Span::styled("* ", Style::default().fg(PIN_FG))
+            } else {
+                Span::styled("  ", Style::default())
             };
 
             let time_str = entry
@@ -105,18 +111,21 @@ fn render_list(frame: &mut Frame, area: Rect, app: &App) {
             let time_span = Span::styled(format!("{time_str} "), Style::default().fg(DIM));
 
             let source_tag = match entry.source {
-                EntrySource::Remote => {
-                    Span::styled("R ", Style::default().fg(Color::Rgb(100, 200, 220)))
-                }
+                EntrySource::Remote => Span::styled("R ", Style::default().fg(Color::Cyan)),
                 EntrySource::Local => Span::styled("L ", Style::default().fg(DIM)),
             };
 
             let preview_text =
                 truncate_line(&entry.preview, area.width.saturating_sub(18) as usize);
-            let preview_span =
-                Span::styled(preview_text, Style::default().fg(Color::Rgb(200, 200, 210)));
+            let preview_span = Span::styled(preview_text, Style::default().fg(Color::Reset));
 
-            let line = Line::from(vec![time_span, source_tag, type_tag, preview_span]);
+            let line = Line::from(vec![
+                pin_span,
+                time_span,
+                source_tag,
+                type_tag,
+                preview_span,
+            ]);
             ListItem::new(line)
         })
         .collect();
@@ -137,6 +146,7 @@ fn render_list(frame: &mut Frame, area: Rect, app: &App) {
         .highlight_style(
             Style::default()
                 .bg(HIGHLIGHT_BG)
+                .fg(Color::Reset)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
@@ -260,32 +270,31 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &mut App) {
         _ => entry.content.clone(),
     };
 
-    let paragraph = Paragraph::new(Text::styled(
-        display,
-        Style::default().fg(Color::Rgb(200, 200, 210)),
-    ))
-    .block(preview_block(&title))
-    .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(Text::styled(display, Style::default().fg(Color::Reset)))
+        .block(preview_block(&title))
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
 }
 
 fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
     let msg = if let Some(ref status) = app.status_message {
-        Span::styled(
-            format!(" {status} "),
-            Style::default().fg(Color::Rgb(80, 200, 120)),
-        )
+        Span::styled(format!(" {status} "), Style::default().fg(Color::Cyan))
     } else {
         Span::raw("")
     };
 
     let keybinds = match app.mode {
-        Mode::Normal => " q:Quit  j/k:Navigate  Enter:Copy  d:Delete  /:Search  r:Reconnect WS ",
+        Mode::Normal => {
+            " q:Quit  j/k:Navigate  Enter:Copy  d:Delete  p:Pin  /:Search  r:Reconnect WS "
+        }
         Mode::Search => " Esc:Cancel  Enter:Confirm  Type to search... ",
     };
 
-    let line = Line::from(vec![msg, Span::styled(keybinds, Style::default().fg(DIM))]);
+    let line = Line::from(vec![
+        msg,
+        Span::styled(keybinds, Style::default().fg(DIM_BRIGHT)),
+    ]);
 
     let bar = Paragraph::new(line).style(Style::default().bg(BAR_BG));
     frame.render_widget(bar, area);

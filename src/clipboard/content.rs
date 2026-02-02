@@ -49,15 +49,20 @@ impl ClipboardContent {
             }
             Self::Image(info) => {
                 hasher.update(b"image:");
-                if let Some(raw) = &info.raw_data {
-                    // Hash the actual image data for accurate dedup
+                // Decode to pixels so the hash is format-independent.
+                // PNG and DIB of the same image will produce the same hash.
+                if let Some(img) = info.to_dynamic_image() {
+                    let rgba = img.to_rgba8();
+                    hasher.update(info.width.to_le_bytes());
+                    hasher.update(info.height.to_le_bytes());
+                    hasher.update(rgba.as_raw());
+                } else if let Some(raw) = &info.raw_data {
                     hasher.update(raw.as_bytes());
                 } else {
                     hasher.update(info.width.to_le_bytes());
                     hasher.update(info.height.to_le_bytes());
                     hasher.update(info.bits_per_pixel.to_le_bytes());
                     hasher.update(info.data_size.to_le_bytes());
-                    hasher.update(format!("{:?}", info.format).as_bytes());
                 }
             }
             Self::Empty => {

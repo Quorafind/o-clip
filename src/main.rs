@@ -8,6 +8,7 @@ mod tui;
 #[cfg(target_os = "windows")]
 mod window;
 
+use std::collections::HashMap;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -109,6 +110,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Register Ctrl+C handler for graceful shutdown
     setup_ctrlc_handler();
 
+    // Dedup cache: tracks content hashes of recently auto-copied remote entries.
+    // When the clipboard monitor captures content that matches a recent auto-copy,
+    // we skip sending it back to the server (preventing echo loops).
+    // Maps pixel-based content_hash -> Instant when it was auto-copied.
+    let mut recent_remote_hashes: HashMap<String, Instant> = HashMap::new();
+    const REMOTE_HASH_TTL: Duration = Duration::from_secs(10);
+
     // Main event loop
     let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
@@ -141,6 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('G') => app.select_last(),
                         KeyCode::Enter => app.copy_selected_to_clipboard(),
                         KeyCode::Char('d') => app.delete_selected(),
+                        KeyCode::Char('p') => app.toggle_pin_selected(),
                         KeyCode::Char('/') => app.enter_search(),
                         KeyCode::Char('r') => {
                             app.status_message = Some(
@@ -172,9 +181,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Process clipboard events (non-blocking)
         while let Ok(event) = clip_rx.try_recv() {
+            let content_hash = event.content.content_hash();
             let entry = ClipboardEntry::from_content(&event.content);
-            // Send to WebSocket if: connected, not cloud-restricted, and within size limit
-            if !event.no_cloud && (entry.byte_size as usize) <= max_sync_size {
+
+            // Check if this content was recently auto-copied from a remote entry.
+            // If so, skip sending it back to the server (prevents echo loops where
+            // the same image bounces between clients in different formats).
+            let is_echo = recent_remote_hashes.remove(&content_hash).is_some();
+
+            if is_echo {
+                tracing::debug!(
+                    "skipping outbound sync for recently auto-copied remote content: {}",
+                    &content_hash[..16]
+                );
+            } else if !event.no_cloud && (entry.byte_size as usize) <= max_sync_size {
                 let _ = ws_outbound_tx.send(entry.clone());
             } else if (entry.byte_size as usize) > max_sync_size {
                 tracing::debug!(
@@ -186,11 +206,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.on_new_entry(entry);
         }
 
+        // Expire old entries from the remote hash dedup cache
+        recent_remote_hashes.retain(|_, ts| ts.elapsed() < REMOTE_HASH_TTL);
+
         // Process WebSocket events (non-blocking)
         while let Ok(ws_event) = ws_event_rx.try_recv() {
             match ws_event {
                 SyncEvent::RemoteEntry(mut entry) => {
                     entry.source = EntrySource::Remote;
+
+                    // Remember the pixel-based content hash so the clipboard
+                    // monitor won't re-send this content back to the server.
+                    if let Some(content) = entry.to_clipboard_content() {
+                        let pixel_hash = content.content_hash();
+                        recent_remote_hashes.insert(pixel_hash, Instant::now());
+                    }
+
+                    // Recompute client-side hash so the local DB dedup works
+                    // correctly across image formats (PNG vs DibV5).
+                    normalize_entry_hash(&mut entry);
+
                     // Auto-copy remote entry to local clipboard (without re-uploading)
                     auto_copy_to_clipboard(&entry);
                     app.on_new_entry(entry);
@@ -198,6 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 SyncEvent::SyncBatch(entries) => {
                     for mut entry in entries {
                         entry.source = EntrySource::Remote;
+                        normalize_entry_hash(&mut entry);
                         app.on_new_entry(entry);
                     }
                 }
@@ -227,6 +263,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = monitor_handle.join();
     tracing::info!("o-clip shutdown complete");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Recompute the entry hash using the client-side pixel-based algorithm.
+// Server entries use a different hash (content_type:content_json) which
+// produces different hashes for the same image in different formats (PNG vs
+// DibV5). By normalizing to the client hash, the local DB's UNIQUE(hash)
+// constraint correctly deduplicates cross-format images.
+// ---------------------------------------------------------------------------
+
+fn normalize_entry_hash(entry: &mut ClipboardEntry) {
+    if let Some(content) = entry.to_clipboard_content() {
+        entry.hash = content.content_hash();
+    }
 }
 
 // ---------------------------------------------------------------------------

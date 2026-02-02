@@ -53,22 +53,32 @@ pub struct ClipboardEntry {
     /// Where this entry came from (local clipboard or remote sync).
     #[serde(default)]
     pub source: EntrySource,
+    /// Whether this entry is pinned (protected from auto-deletion).
+    #[serde(default)]
+    pub pinned: bool,
+    /// Client-computed content hash (pixel-based for images, format-independent).
+    /// Sent to the server for cross-format dedup.
+    #[serde(default)]
+    pub client_hash: String,
 }
 
 impl ClipboardEntry {
     /// Create a new entry from clipboard content.
     pub fn from_content(content: &ClipboardContent) -> Self {
         let content_json = serde_json::to_string(content).unwrap_or_default();
+        let hash = content.content_hash();
         Self {
             id: 0,
             content_type: content.content_type().to_string(),
             content: content_json,
             preview: content.preview(120),
-            hash: content.content_hash(),
+            client_hash: hash.clone(),
+            hash,
             byte_size: content.byte_size() as i64,
             synced: false,
             created_at: Utc::now(),
             source: EntrySource::Local,
+            pinned: false,
         }
     }
 
@@ -124,6 +134,17 @@ impl Store {
             )?;
         }
 
+        // Migration: add pinned column to existing databases.
+        let has_pinned: bool = self
+            .conn
+            .prepare("SELECT pinned FROM entries LIMIT 0")
+            .is_ok();
+        if !has_pinned {
+            self.conn.execute_batch(
+                "ALTER TABLE entries ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+
         Ok(())
     }
 
@@ -152,7 +173,7 @@ impl Store {
     /// List entries ordered by most recent first.
     pub fn list(&self, limit: usize, offset: usize) -> rusqlite::Result<Vec<ClipboardEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, content_type, content, preview, hash, byte_size, synced, created_at, source
+            "SELECT id, content_type, content, preview, hash, byte_size, synced, created_at, source, pinned
              FROM entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
@@ -166,6 +187,8 @@ impl Store {
                 synced: row.get::<_, i32>(6)? != 0,
                 created_at: parse_datetime(row.get::<_, String>(7)?),
                 source: EntrySource::from_str(&row.get::<_, String>(8).unwrap_or_default()),
+                pinned: row.get::<_, i32>(9)? != 0,
+                client_hash: String::new(),
             })
         })?;
         rows.collect()
@@ -175,7 +198,7 @@ impl Store {
     #[allow(dead_code)]
     pub fn get(&self, id: i64) -> rusqlite::Result<Option<ClipboardEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, content_type, content, preview, hash, byte_size, synced, created_at, source
+            "SELECT id, content_type, content, preview, hash, byte_size, synced, created_at, source, pinned
              FROM entries WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], |row| {
@@ -189,6 +212,8 @@ impl Store {
                 synced: row.get::<_, i32>(6)? != 0,
                 created_at: parse_datetime(row.get::<_, String>(7)?),
                 source: EntrySource::from_str(&row.get::<_, String>(8).unwrap_or_default()),
+                pinned: row.get::<_, i32>(9)? != 0,
+                client_hash: String::new(),
             })
         })?;
         match rows.next() {
@@ -209,7 +234,7 @@ impl Store {
     pub fn search(&self, query: &str) -> rusqlite::Result<Vec<ClipboardEntry>> {
         let pattern = format!("%{query}%");
         let mut stmt = self.conn.prepare(
-            "SELECT id, content_type, content, preview, hash, byte_size, synced, created_at, source
+            "SELECT id, content_type, content, preview, hash, byte_size, synced, created_at, source, pinned
              FROM entries WHERE preview LIKE ?1 OR content LIKE ?1
              ORDER BY created_at DESC LIMIT 200",
         )?;
@@ -224,6 +249,8 @@ impl Store {
                 synced: row.get::<_, i32>(6)? != 0,
                 created_at: parse_datetime(row.get::<_, String>(7)?),
                 source: EntrySource::from_str(&row.get::<_, String>(8).unwrap_or_default()),
+                pinned: row.get::<_, i32>(9)? != 0,
+                client_hash: String::new(),
             })
         })?;
         rows.collect()
@@ -236,14 +263,29 @@ impl Store {
     }
 
     /// Enforce a maximum number of stored entries by deleting the oldest.
+    /// Pinned entries are never deleted by this limit.
     pub fn enforce_limit(&self, max_entries: usize) -> rusqlite::Result<()> {
         self.conn.execute(
-            "DELETE FROM entries WHERE id NOT IN (
-                SELECT id FROM entries ORDER BY created_at DESC LIMIT ?1
+            "DELETE FROM entries WHERE pinned = 0 AND id NOT IN (
+                SELECT id FROM entries WHERE pinned = 0 ORDER BY created_at DESC LIMIT ?1
             )",
             params![max_entries as i64],
         )?;
         Ok(())
+    }
+
+    /// Toggle the pinned state of an entry. Returns the new pinned value.
+    pub fn toggle_pin(&self, id: i64) -> rusqlite::Result<bool> {
+        self.conn.execute(
+            "UPDATE entries SET pinned = CASE WHEN pinned = 0 THEN 1 ELSE 0 END WHERE id = ?1",
+            params![id],
+        )?;
+        let pinned: bool = self.conn.query_row(
+            "SELECT pinned FROM entries WHERE id = ?1",
+            params![id],
+            |row| Ok(row.get::<_, i32>(0)? != 0),
+        )?;
+        Ok(pinned)
     }
 
     /// Mark an entry as synced. Used by sync protocol.
@@ -258,7 +300,7 @@ impl Store {
     #[allow(dead_code)]
     pub fn unsynced(&self, limit: usize) -> rusqlite::Result<Vec<ClipboardEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, content_type, content, preview, hash, byte_size, synced, created_at, source
+            "SELECT id, content_type, content, preview, hash, byte_size, synced, created_at, source, pinned
              FROM entries WHERE synced = 0 ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
@@ -272,6 +314,8 @@ impl Store {
                 synced: row.get::<_, i32>(6)? != 0,
                 created_at: parse_datetime(row.get::<_, String>(7)?),
                 source: EntrySource::from_str(&row.get::<_, String>(8).unwrap_or_default()),
+                pinned: row.get::<_, i32>(9)? != 0,
+                client_hash: String::new(),
             })
         })?;
         rows.collect()

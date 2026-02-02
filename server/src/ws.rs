@@ -130,6 +130,10 @@ async fn handle_client_message(
 
     match client_msg {
         ClientMessage::ClipboardEntry(mut entry) => {
+            // Preserve the client-computed hash (pixel-based, format-independent)
+            // before overwriting with the server hash.
+            let client_hash = std::mem::take(&mut entry.client_hash);
+
             // Server recomputes hash and byte_size to prevent client-side forgery
             entry.hash = entry.compute_server_hash();
             entry.byte_size = entry.content.len() as i64;
@@ -146,14 +150,14 @@ async fn handle_client_message(
                 return;
             }
 
-            // Server-side dedup: skip if hash already exists (but still bump timestamp)
+            // Server-side dedup: skip if server hash already exists (but still bump timestamp)
             match state.store.has_hash(&entry.hash) {
                 Ok(true) => {
                     tracing::debug!(
                         "dedup: bumping existing entry with hash {} from {client_id}",
                         &entry.hash[..16]
                     );
-                    let _ = state.store.insert(&entry, client_id);
+                    let _ = state.store.insert(&entry, client_id, &client_hash);
                     return;
                 }
                 Ok(false) => {}
@@ -162,8 +166,28 @@ async fn handle_client_message(
                 }
             }
 
+            // Cross-format dedup: check if the client-computed hash already exists.
+            // This catches duplicate images that differ in format (PNG vs DibV5)
+            // but contain the same pixel data.
+            if !client_hash.is_empty() {
+                match state.store.has_client_hash(&client_hash) {
+                    Ok(true) => {
+                        tracing::debug!(
+                            "dedup: skipping cross-format duplicate (client_hash {}) from {client_id}",
+                            &client_hash[..client_hash.len().min(16)]
+                        );
+                        let _ = state.store.insert(&entry, client_id, &client_hash);
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!("db error checking client_hash: {e}");
+                    }
+                }
+            }
+
             // Store in server DB
-            match state.store.insert(&entry, client_id) {
+            match state.store.insert(&entry, client_id, &client_hash) {
                 Ok(true) => {
                     tracing::info!(
                         "stored entry from {client_id}: [{}] {}",

@@ -48,16 +48,36 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_entries_hash ON entries(hash);",
-        )
+        )?;
+
+        // Migration: add client_hash column for cross-format image dedup.
+        // The client computes a pixel-based hash that is format-independent
+        // (PNG and DibV5 of the same image produce the same hash).
+        let has_client_hash: bool = conn
+            .prepare("SELECT client_hash FROM entries LIMIT 0")
+            .is_ok();
+        if !has_client_hash {
+            conn.execute_batch(
+                "ALTER TABLE entries ADD COLUMN client_hash TEXT NOT NULL DEFAULT '';
+                 CREATE INDEX IF NOT EXISTS idx_entries_client_hash ON entries(client_hash);",
+            )?;
+        }
+
+        Ok(())
     }
 
     /// Insert an entry. Returns true if actually inserted (not a duplicate).
     /// On hash conflict, bumps created_at to the top.
-    pub fn insert(&self, entry: &ClipboardEntry, client_id: &str) -> rusqlite::Result<bool> {
+    pub fn insert(
+        &self,
+        entry: &ClipboardEntry,
+        client_id: &str,
+        client_hash: &str,
+    ) -> rusqlite::Result<bool> {
         let conn = self.conn.lock().unwrap();
         let changes = conn.execute(
-            "INSERT INTO entries (client_id, content_type, content, preview, hash, byte_size, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO entries (client_id, content_type, content, preview, hash, byte_size, created_at, client_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at",
             params![
                 client_id,
@@ -67,6 +87,7 @@ impl Store {
                 entry.hash,
                 entry.byte_size,
                 entry.created_at.to_rfc3339(),
+                client_hash,
             ],
         )?;
         Ok(changes > 0)
@@ -90,17 +111,34 @@ impl Store {
                 byte_size: row.get(5)?,
                 synced: true,
                 created_at: parse_datetime(row.get::<_, String>(6)?),
+                client_hash: String::new(),
             })
         })?;
         rows.collect()
     }
 
-    /// Check if a hash already exists.
+    /// Check if a hash already exists (server-computed hash).
     pub fn has_hash(&self, hash: &str) -> rusqlite::Result<bool> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM entries WHERE hash = ?1",
             params![hash],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Check if a client-computed hash already exists.
+    /// This catches cross-format duplicates (e.g. PNG vs DibV5 of the same image)
+    /// because the client hash is pixel-based and format-independent.
+    pub fn has_client_hash(&self, client_hash: &str) -> rusqlite::Result<bool> {
+        if client_hash.is_empty() {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM entries WHERE client_hash = ?1",
+            params![client_hash],
             |row| row.get(0),
         )?;
         Ok(count > 0)
@@ -165,6 +203,7 @@ mod tests {
             byte_size: content.len() as i64,
             synced: false,
             created_at: Utc::now(),
+            client_hash: String::new(),
         };
         entry.hash = entry.compute_server_hash();
         entry
@@ -176,7 +215,7 @@ mod tests {
         assert_eq!(store.count().unwrap(), 0);
 
         let entry = make_entry("hello world");
-        let inserted = store.insert(&entry, "client-1").unwrap();
+        let inserted = store.insert(&entry, "client-1", "").unwrap();
         assert!(inserted);
         assert_eq!(store.count().unwrap(), 1);
     }
@@ -186,8 +225,8 @@ mod tests {
         let (store, _dir) = temp_store();
 
         let entry = make_entry("duplicate content");
-        store.insert(&entry, "client-1").unwrap();
-        store.insert(&entry, "client-2").unwrap();
+        store.insert(&entry, "client-1", "").unwrap();
+        store.insert(&entry, "client-2", "").unwrap();
 
         // Should still be 1 entry (hash-based dedup via ON CONFLICT)
         assert_eq!(store.count().unwrap(), 1);
@@ -200,10 +239,25 @@ mod tests {
         let entry = make_entry("check hash");
         assert!(!store.has_hash(&entry.hash).unwrap());
 
-        store.insert(&entry, "c1").unwrap();
+        store.insert(&entry, "c1", "").unwrap();
         assert!(store.has_hash(&entry.hash).unwrap());
 
         assert!(!store.has_hash("nonexistent_hash").unwrap());
+    }
+
+    #[test]
+    fn has_client_hash_works() {
+        let (store, _dir) = temp_store();
+
+        let entry = make_entry("client hash test");
+        let client_hash = "pixel_based_hash_abc123";
+        assert!(!store.has_client_hash(client_hash).unwrap());
+
+        store.insert(&entry, "c1", client_hash).unwrap();
+        assert!(store.has_client_hash(client_hash).unwrap());
+
+        // Empty client hash should always return false
+        assert!(!store.has_client_hash("").unwrap());
     }
 
     #[test]
@@ -213,7 +267,7 @@ mod tests {
         for i in 0..5 {
             let mut entry = make_entry(&format!("entry_{i}"));
             entry.created_at = Utc::now() + chrono::Duration::seconds(i as i64);
-            store.insert(&entry, "c1").unwrap();
+            store.insert(&entry, "c1", "").unwrap();
         }
 
         let recent = store.recent(3, 200).unwrap();
@@ -231,7 +285,7 @@ mod tests {
         for i in 0..10 {
             let mut entry = make_entry(&format!("item_{i}"));
             entry.created_at = Utc::now() + chrono::Duration::seconds(i as i64);
-            store.insert(&entry, "c1").unwrap();
+            store.insert(&entry, "c1", "").unwrap();
         }
 
         // Client requests 100, but max_limit is 5
@@ -246,7 +300,7 @@ mod tests {
         for i in 0..10 {
             let mut entry = make_entry(&format!("limit_test_{i}"));
             entry.created_at = Utc::now() + chrono::Duration::seconds(i as i64);
-            store.insert(&entry, "c1").unwrap();
+            store.insert(&entry, "c1", "").unwrap();
         }
         assert_eq!(store.count().unwrap(), 10);
 
@@ -267,8 +321,8 @@ mod tests {
 
         let e1 = make_entry("aaa");
         let e2 = make_entry("bbbbbb");
-        store.insert(&e1, "c1").unwrap();
-        store.insert(&e2, "c1").unwrap();
+        store.insert(&e1, "c1", "").unwrap();
+        store.insert(&e2, "c1", "").unwrap();
 
         let total = store.total_bytes().unwrap();
         assert_eq!(total, e1.byte_size + e2.byte_size);
@@ -281,12 +335,12 @@ mod tests {
         let mut entry = make_entry("bump test");
         let old_time = Utc::now() - chrono::Duration::hours(1);
         entry.created_at = old_time;
-        store.insert(&entry, "c1").unwrap();
+        store.insert(&entry, "c1", "").unwrap();
 
         // Insert same hash with a newer timestamp
         let mut entry2 = make_entry("bump test");
         entry2.created_at = Utc::now();
-        store.insert(&entry2, "c1").unwrap();
+        store.insert(&entry2, "c1", "").unwrap();
 
         // Should still be 1 entry but with updated timestamp
         assert_eq!(store.count().unwrap(), 1);
@@ -300,7 +354,7 @@ mod tests {
 
         for i in 0..500 {
             let entry = make_entry(&format!("stress_entry_{i}"));
-            store.insert(&entry, "c1").unwrap();
+            store.insert(&entry, "c1", "").unwrap();
         }
 
         assert_eq!(store.count().unwrap(), 500);
@@ -320,8 +374,8 @@ mod tests {
         e2.content_type = "url".to_string();
         e2.hash = e2.compute_server_hash();
 
-        store.insert(&e1, "c1").unwrap();
-        store.insert(&e2, "c1").unwrap();
+        store.insert(&e1, "c1", "").unwrap();
+        store.insert(&e2, "c1", "").unwrap();
 
         // Different content_type -> different hash -> 2 entries
         assert_eq!(store.count().unwrap(), 2);

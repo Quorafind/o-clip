@@ -155,6 +155,26 @@ impl App {
         }
     }
 
+    /// Toggle pin on the currently selected entry.
+    pub fn toggle_pin_selected(&mut self) {
+        if let Some(entry) = self.entries.get(self.selected) {
+            let id = entry.id;
+            match self.store.toggle_pin(id) {
+                Ok(pinned) => {
+                    self.status_message = Some(if pinned {
+                        "Entry pinned".to_string()
+                    } else {
+                        "Entry unpinned".to_string()
+                    });
+                    self.reload_entries();
+                }
+                Err(e) => {
+                    tracing::warn!("failed to toggle pin for entry {id}: {e}");
+                }
+            }
+        }
+    }
+
     /// Delete the currently selected entry.
     pub fn delete_selected(&mut self) {
         if let Some(entry) = self.entries.get(self.selected) {

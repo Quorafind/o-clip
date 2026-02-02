@@ -93,6 +93,7 @@ fn make_entry(content: &str) -> ClipboardEntry {
         byte_size: content.len() as i64,
         synced: false,
         created_at: Utc::now(),
+        client_hash: String::new(),
     };
     entry.hash = entry.compute_server_hash();
     entry

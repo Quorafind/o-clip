@@ -21,6 +21,10 @@ pub struct ClipboardEntry {
     #[serde(default)]
     pub synced: bool,
     pub created_at: DateTime<Utc>,
+    /// Client-computed content hash (pixel-based for images, format-independent).
+    /// Used by the server for cross-format dedup alongside the server-computed hash.
+    #[serde(default)]
+    pub client_hash: String,
 }
 
 impl ClipboardEntry {
@@ -91,6 +95,7 @@ mod tests {
             byte_size: content.len() as i64,
             synced: false,
             created_at: Utc::now(),
+            client_hash: String::new(),
         }
     }
 
