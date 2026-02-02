@@ -1,0 +1,22 @@
+services:
+  fast-copy-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fast-copy-server
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - fast-copy-data:/app/data
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  fast-copy-data:
