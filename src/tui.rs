@@ -85,50 +85,86 @@ fn render_list(frame: &mut Frame, area: Rect, app: &App) {
         " Clipboard History ".to_string()
     };
 
-    let items: Vec<ListItem> = app
-        .entries
-        .iter()
-        .map(|entry| {
-            let type_tag = match entry.content_type.as_str() {
-                "text" => Span::styled("[T] ", Style::default().fg(Color::Blue)),
-                "url" => Span::styled("[U] ", Style::default().fg(Color::Magenta)),
-                "files" => Span::styled("[F] ", Style::default().fg(Color::Green)),
-                "image" => Span::styled("[I] ", Style::default().fg(Color::Yellow)),
-                _ => Span::styled("[?] ", Style::default().fg(DIM)),
-            };
+    // Partition entries into pinned and unpinned groups.
+    let pinned_count = app.entries.iter().filter(|e| e.pinned).count();
 
-            let pin_span = if entry.pinned {
-                Span::styled("* ", Style::default().fg(PIN_FG))
-            } else {
-                Span::styled("  ", Style::default())
-            };
+    let make_entry_item = |entry: &crate::store::ClipboardEntry| -> ListItem {
+        let type_tag = match entry.content_type.as_str() {
+            "text" => Span::styled("[T] ", Style::default().fg(Color::Blue)),
+            "url" => Span::styled("[U] ", Style::default().fg(Color::Magenta)),
+            "files" => Span::styled("[F] ", Style::default().fg(Color::Green)),
+            "image" => Span::styled("[I] ", Style::default().fg(Color::Yellow)),
+            _ => Span::styled("[?] ", Style::default().fg(DIM)),
+        };
 
-            let time_str = entry
-                .created_at
-                .with_timezone(&Local)
-                .format("%H:%M:%S")
-                .to_string();
-            let time_span = Span::styled(format!("{time_str} "), Style::default().fg(DIM));
+        let pin_span = if entry.pinned {
+            Span::styled("* ", Style::default().fg(PIN_FG))
+        } else {
+            Span::styled("  ", Style::default())
+        };
 
-            let source_tag = match entry.source {
-                EntrySource::Remote => Span::styled("R ", Style::default().fg(Color::Cyan)),
-                EntrySource::Local => Span::styled("L ", Style::default().fg(DIM)),
-            };
+        let time_str = entry
+            .created_at
+            .with_timezone(&Local)
+            .format("%H:%M:%S")
+            .to_string();
+        let time_span = Span::styled(format!("{time_str} "), Style::default().fg(DIM));
 
-            let preview_text =
-                truncate_line(&entry.preview, area.width.saturating_sub(18) as usize);
-            let preview_span = Span::styled(preview_text, Style::default().fg(Color::Reset));
+        let source_tag = match entry.source {
+            EntrySource::Remote => Span::styled("R ", Style::default().fg(Color::Cyan)),
+            EntrySource::Local => Span::styled("L ", Style::default().fg(DIM)),
+        };
 
-            let line = Line::from(vec![
-                pin_span,
-                time_span,
-                source_tag,
-                type_tag,
-                preview_span,
-            ]);
-            ListItem::new(line)
-        })
-        .collect();
+        let preview_text = truncate_line(&entry.preview, area.width.saturating_sub(18) as usize);
+        let preview_span = Span::styled(preview_text, Style::default().fg(Color::Reset));
+
+        let line = Line::from(vec![
+            pin_span,
+            time_span,
+            source_tag,
+            type_tag,
+            preview_span,
+        ]);
+        ListItem::new(line)
+    };
+
+    // Build visual list with group headers when pinned entries exist.
+    // Track how many header rows are inserted before the selected entry
+    // so we can map app.selected → visual index.
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut header_offset = 0; // headers before or at current entry position
+
+    if pinned_count > 0 {
+        // -- Pinned group header --
+        items.push(ListItem::new(Line::from(Span::styled(
+            "── Pinned ──",
+            Style::default().fg(PIN_FG).add_modifier(Modifier::BOLD),
+        ))));
+        for entry in app.entries.iter().take(pinned_count) {
+            items.push(make_entry_item(entry));
+        }
+
+        // -- History group header --
+        if pinned_count < app.entries.len() {
+            items.push(ListItem::new(Line::from(Span::styled(
+                "── History ──",
+                Style::default().fg(DIM_BRIGHT).add_modifier(Modifier::BOLD),
+            ))));
+        }
+
+        // Compute header offset for selection mapping:
+        // 1 header always before pinned items; +1 header if selected is in history section
+        header_offset = if app.selected < pinned_count { 1 } else { 2 };
+
+        for entry in app.entries.iter().skip(pinned_count) {
+            items.push(make_entry_item(entry));
+        }
+    } else {
+        // No pinned entries – flat list, no headers.
+        for entry in app.entries.iter() {
+            items.push(make_entry_item(entry));
+        }
+    };
 
     let border_color = if app.mode == Mode::Search {
         BORDER_ACTIVE
@@ -152,7 +188,7 @@ fn render_list(frame: &mut Frame, area: Rect, app: &App) {
         .highlight_symbol("> ");
 
     let mut state = ListState::default();
-    state.select(Some(app.selected));
+    state.select(Some(app.selected + header_offset));
     frame.render_stateful_widget(list, area, &mut state);
 }
 

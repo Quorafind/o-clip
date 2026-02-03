@@ -174,7 +174,7 @@ impl Store {
     pub fn list(&self, limit: usize, offset: usize) -> rusqlite::Result<Vec<ClipboardEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content_type, content, preview, hash, byte_size, synced, created_at, source, pinned
-             FROM entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+             FROM entries ORDER BY pinned DESC, created_at DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
             Ok(ClipboardEntry {
@@ -236,7 +236,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, content_type, content, preview, hash, byte_size, synced, created_at, source, pinned
              FROM entries WHERE preview LIKE ?1 OR content LIKE ?1
-             ORDER BY created_at DESC LIMIT 200",
+             ORDER BY pinned DESC, created_at DESC LIMIT 200",
         )?;
         let rows = stmt.query_map(params![pattern], |row| {
             Ok(ClipboardEntry {

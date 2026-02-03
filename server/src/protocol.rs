@@ -55,6 +55,10 @@ pub enum ClientMessage {
     #[serde(rename = "sync_request")]
     SyncRequest { limit: usize },
 
+    /// Client authentication with password.
+    #[serde(rename = "auth")]
+    Auth { password: String },
+
     /// Keepalive.
     #[serde(rename = "ping")]
     Ping,
@@ -71,6 +75,10 @@ pub enum ServerMessage {
     /// Response to sync_request: a batch of recent entries.
     #[serde(rename = "sync_response")]
     SyncResponse { entries: Vec<ClipboardEntry> },
+
+    /// Authentication result.
+    #[serde(rename = "auth_result")]
+    AuthResult { success: bool, message: String },
 
     /// Server-side error / rate limit notification.
     #[serde(rename = "error")]

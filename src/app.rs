@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
+use tokio::sync::Notify;
 
 use crate::clipboard::ClipboardContent;
 use crate::store::{ClipboardEntry, Store};
@@ -40,6 +43,8 @@ pub struct App {
     pub image_preview: Option<StatefulProtocol>,
     /// Entry ID that `image_preview` was generated for (cache key).
     image_preview_for: Option<i64>,
+    /// Notify handle to trigger manual WS reconnect.
+    pub reconnect_notify: Option<Arc<Notify>>,
 }
 
 impl App {
@@ -60,6 +65,7 @@ impl App {
             picker,
             image_preview: None,
             image_preview_for: None,
+            reconnect_notify: None,
         };
         app.update_image_preview();
         app

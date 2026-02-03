@@ -48,6 +48,11 @@ async fn main() {
         config.rate_limit_bytes,
         config.rate_limit_max_message_size
     );
+    if config.password.as_ref().is_some_and(|p| !p.is_empty()) {
+        tracing::info!("password authentication enabled");
+    } else {
+        tracing::info!("password authentication disabled (no password set)");
+    }
 
     // Open store
     let db_path = config.db_path();

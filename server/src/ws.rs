@@ -1,9 +1,11 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 
 use crate::config::ServerConfig;
@@ -35,6 +37,44 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
 
     let (mut sink, mut stream): (SplitSink<WebSocket, Message>, SplitStream<WebSocket>) =
         socket.split();
+
+    // Authentication gate: if server has a password configured, require auth first
+    if let Some(ref expected) = state.config.password {
+        if !expected.is_empty() {
+            let authed = match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    match serde_json::from_str::<ClientMessage>(&text) {
+                        Ok(ClientMessage::Auth { password }) => {
+                            let pwd_bytes = password.as_bytes();
+                            let exp_bytes = expected.as_bytes();
+                            // Constant-time comparison to prevent timing attacks
+                            pwd_bytes.len() == exp_bytes.len() && pwd_bytes.ct_eq(exp_bytes).into()
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+
+            if !authed {
+                tracing::warn!("auth failed from {client_id}");
+                let msg = ServerMessage::AuthResult {
+                    success: false,
+                    message: "authentication failed".to_string(),
+                };
+                let _ = send_msg(&mut sink, &msg).await;
+                return;
+            }
+
+            tracing::info!("auth succeeded for {client_id}");
+            let msg = ServerMessage::AuthResult {
+                success: true,
+                message: "authenticated".to_string(),
+            };
+            let _ = send_msg(&mut sink, &msg).await;
+        }
+    }
+
     let mut broadcast_rx = state.broadcast_tx.subscribe();
 
     loop {
@@ -237,6 +277,10 @@ async fn handle_client_message(
                     let _ = send_msg(sink, &err).await;
                 }
             }
+        }
+
+        ClientMessage::Auth { .. } => {
+            // Auth after initial handshake is ignored
         }
 
         ClientMessage::Ping => {

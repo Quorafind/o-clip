@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -21,6 +21,10 @@ pub enum ClientMessage {
     #[serde(rename = "sync_request")]
     SyncRequest { limit: usize },
 
+    /// Client authentication with password.
+    #[serde(rename = "auth")]
+    Auth { password: String },
+
     /// Keepalive.
     #[serde(rename = "ping")]
     Ping,
@@ -37,6 +41,10 @@ pub enum ServerMessage {
     /// Response to sync_request: batch of recent entries.
     #[serde(rename = "sync_response")]
     SyncResponse { entries: Vec<ClipboardEntry> },
+
+    /// Authentication result.
+    #[serde(rename = "auth_result")]
+    AuthResult { success: bool, message: String },
 
     /// Server-side error.
     #[serde(rename = "error")]
@@ -152,8 +160,10 @@ mod danger {
 pub async fn run_sync(
     url: String,
     accept_invalid_certs: bool,
+    password: Option<String>,
     mut outbound_rx: mpsc::UnboundedReceiver<ClipboardEntry>,
     event_tx: std::sync::mpsc::Sender<SyncEvent>,
+    reconnect_notify: Arc<Notify>,
 ) {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(30);
@@ -184,11 +194,68 @@ pub async fn run_sync(
 
         match connect_result {
             Ok((ws_stream, _)) => {
-                let _ = event_tx.send(SyncEvent::StatusChanged(ConnectionStatus::Connected));
                 tracing::info!("connected to sync server");
                 backoff = Duration::from_secs(1);
 
                 let (mut sink, mut stream) = ws_stream.split();
+
+                // Authenticate if password is configured
+                if let Some(ref pwd) = password {
+                    if !pwd.is_empty() {
+                        let auth_msg = ClientMessage::Auth {
+                            password: pwd.clone(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&auth_msg) {
+                            if let Err(e) = sink.send(Message::Text(json.into())).await {
+                                tracing::warn!("failed to send auth: {e}");
+                                let _ = event_tx
+                                    .send(SyncEvent::StatusChanged(ConnectionStatus::Disconnected));
+                                tokio::time::sleep(backoff).await;
+                                backoff = (backoff * 2).min(max_backoff);
+                                continue;
+                            }
+                        }
+
+                        // Wait for auth result
+                        match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+                            Ok(Some(Ok(Message::Text(text)))) => {
+                                match serde_json::from_str::<ServerMessage>(&text) {
+                                    Ok(ServerMessage::AuthResult { success, message }) => {
+                                        if !success {
+                                            tracing::error!("auth failed: {message}");
+                                            let _ = event_tx.send(SyncEvent::StatusChanged(
+                                                ConnectionStatus::Disconnected,
+                                            ));
+                                            tokio::time::sleep(backoff).await;
+                                            backoff = (backoff * 2).min(max_backoff);
+                                            continue;
+                                        }
+                                        tracing::info!("auth succeeded");
+                                    }
+                                    _ => {
+                                        tracing::error!("unexpected response during auth");
+                                        let _ = event_tx.send(SyncEvent::StatusChanged(
+                                            ConnectionStatus::Disconnected,
+                                        ));
+                                        tokio::time::sleep(backoff).await;
+                                        backoff = (backoff * 2).min(max_backoff);
+                                        continue;
+                                    }
+                                }
+                            }
+                            _ => {
+                                tracing::error!("auth timeout or connection error");
+                                let _ = event_tx
+                                    .send(SyncEvent::StatusChanged(ConnectionStatus::Disconnected));
+                                tokio::time::sleep(backoff).await;
+                                backoff = (backoff * 2).min(max_backoff);
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                let _ = event_tx.send(SyncEvent::StatusChanged(ConnectionStatus::Connected));
 
                 // Send initial sync request to get recent history
                 let sync_req = ClientMessage::SyncRequest { limit: 200 };
@@ -239,6 +306,11 @@ pub async fn run_sync(
                                 }
                             }
                         }
+                        // Manual reconnect requested
+                        _ = reconnect_notify.notified() => {
+                            tracing::info!("manual reconnect requested");
+                            break;
+                        }
                     }
                 }
             }
@@ -249,8 +321,15 @@ pub async fn run_sync(
 
         let _ = event_tx.send(SyncEvent::StatusChanged(ConnectionStatus::Disconnected));
         tracing::info!("reconnecting in {}s...", backoff.as_secs());
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(max_backoff);
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {
+                backoff = (backoff * 2).min(max_backoff);
+            }
+            _ = reconnect_notify.notified() => {
+                tracing::info!("manual reconnect requested during backoff");
+                backoff = Duration::from_secs(1);
+            }
+        }
     }
 }
 
@@ -262,6 +341,9 @@ fn handle_server_message(text: &str, event_tx: &std::sync::mpsc::Sender<SyncEven
         Ok(ServerMessage::SyncResponse { entries }) => {
             tracing::info!("received sync_response with {} entries", entries.len());
             let _ = event_tx.send(SyncEvent::SyncBatch(entries));
+        }
+        Ok(ServerMessage::AuthResult { .. }) => {
+            // Auth result outside handshake phase, ignore
         }
         Ok(ServerMessage::Error { message }) => {
             tracing::warn!("server error: {message}");

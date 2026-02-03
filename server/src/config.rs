@@ -36,6 +36,12 @@ pub struct ServerConfig {
     #[serde(default = "default_max_msg_size")]
     pub rate_limit_max_message_size: usize,
 
+    /// Optional password for client authentication.
+    /// When set, clients must send an `Auth` message with this password
+    /// before any other messages are accepted.
+    #[serde(default)]
+    pub password: Option<String>,
+
     /// Path to TLS certificate PEM file. When both `tls_cert` and `tls_key`
     /// are set, the server listens with TLS (wss://). Otherwise plain ws://.
     #[serde(default)]
@@ -83,6 +89,7 @@ impl Default for ServerConfig {
             rate_limit_messages: default_rate_msg(),
             rate_limit_bytes: default_rate_bytes(),
             rate_limit_max_message_size: default_max_msg_size(),
+            password: None,
             tls_cert: None,
             tls_key: None,
             config_dir: PathBuf::from("."),

@@ -37,6 +37,9 @@ pub struct ServerConfig {
     /// Only enable this for LAN deployments with self-signed certificates.
     #[serde(default)]
     pub accept_invalid_certs: bool,
+    /// Password for server authentication. Must match the server's configured password.
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +68,7 @@ impl Default for ServerConfig {
             auto_connect: true,
             max_sync_size: default_max_sync_size(),
             accept_invalid_certs: false,
+            password: None,
         }
     }
 }

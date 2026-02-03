@@ -10,6 +10,7 @@ mod window;
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::ExecutableCommand;
@@ -72,7 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn tokio runtime for WebSocket sync
     let ws_url = config.server.url.clone();
     let accept_invalid_certs = config.server.accept_invalid_certs;
+    let ws_password = config.server.password.clone();
     let has_server = config.has_server() && config.server.auto_connect;
+    let reconnect_notify = Arc::new(tokio::sync::Notify::new());
+    let reconnect_notify_sync = reconnect_notify.clone();
     let _rt_handle = std::thread::spawn(move || {
         if !has_server {
             return;
@@ -85,8 +89,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rt.block_on(sync::run_sync(
             ws_url,
             accept_invalid_certs,
+            ws_password,
             ws_outbound_rx,
             ws_event_tx,
+            reconnect_notify_sync,
         ));
     });
 
@@ -106,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create app state
     let mut app = App::new(store, config.storage.max_entries, picker);
+    app.reconnect_notify = Some(reconnect_notify);
 
     // Register Ctrl+C handler for graceful shutdown
     setup_ctrlc_handler();
@@ -152,9 +159,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('p') => app.toggle_pin_selected(),
                         KeyCode::Char('/') => app.enter_search(),
                         KeyCode::Char('r') => {
-                            app.status_message = Some(
-                                "WebSocket reconnect not yet supported via keybind".to_string(),
-                            );
+                            if let Some(ref notify) = app.reconnect_notify {
+                                notify.notify_one();
+                                app.status_message = Some("Reconnecting...".to_string());
+                            }
                         }
                         _ => {}
                     },
