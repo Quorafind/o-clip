@@ -39,8 +39,13 @@ pub enum ServerMessage {
     ClipboardEntry(ClipboardEntry),
 
     /// Response to sync_request: batch of recent entries.
+    /// `done` is true when this is the last chunk.
     #[serde(rename = "sync_response")]
-    SyncResponse { entries: Vec<ClipboardEntry> },
+    SyncResponse {
+        entries: Vec<ClipboardEntry>,
+        #[serde(default)]
+        done: bool,
+    },
 
     /// Authentication result.
     #[serde(rename = "auth_result")]
@@ -257,8 +262,9 @@ pub async fn run_sync(
 
                 let _ = event_tx.send(SyncEvent::StatusChanged(ConnectionStatus::Connected));
 
-                // Send initial sync request to get recent history
-                let sync_req = ClientMessage::SyncRequest { limit: 200 };
+                // Send initial sync request to get recent history.
+                // Server will chunk the response to avoid large single messages.
+                let sync_req = ClientMessage::SyncRequest { limit: 50 };
                 if let Ok(json) = serde_json::to_string(&sync_req) {
                     if let Err(e) = sink.send(Message::Text(json.into())).await {
                         tracing::warn!("failed to send sync_request: {e}");
@@ -338,8 +344,11 @@ fn handle_server_message(text: &str, event_tx: &std::sync::mpsc::Sender<SyncEven
         Ok(ServerMessage::ClipboardEntry(entry)) => {
             let _ = event_tx.send(SyncEvent::RemoteEntry(entry));
         }
-        Ok(ServerMessage::SyncResponse { entries }) => {
-            tracing::info!("received sync_response with {} entries", entries.len());
+        Ok(ServerMessage::SyncResponse { entries, done }) => {
+            tracing::info!(
+                "received sync_response chunk with {} entries (done={done})",
+                entries.len()
+            );
             let _ = event_tx.send(SyncEvent::SyncBatch(entries));
         }
         Ok(ServerMessage::AuthResult { .. }) => {

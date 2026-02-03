@@ -70,6 +70,7 @@ fn default_test_config() -> ServerConfig {
         max_entries: 1000,
         max_entry_bytes: 1024 * 1024,
         max_sync_batch: 50,
+        sync_chunk_size: 200, // large chunk so existing tests get a single response
         ..Default::default()
     }
 }
@@ -158,7 +159,7 @@ async fn single_entry_stored_and_synced() {
     let text = recv_text(&mut ws).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].content, "hello from test");
             assert_eq!(entries[0].content_type, "text");
@@ -166,6 +167,56 @@ async fn single_entry_stored_and_synced() {
         }
         other => panic!("expected SyncResponse, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn sync_response_is_chunked() {
+    let config = ServerConfig {
+        max_entries: 1000,
+        max_entry_bytes: 1024 * 1024,
+        max_sync_batch: 50,
+        sync_chunk_size: 3, // small chunks for testing
+        ..Default::default()
+    };
+    let addr = start_test_server(config, default_rate_config()).await;
+    let mut ws = connect(addr).await;
+
+    // Insert 7 entries
+    for i in 0..7 {
+        let entry = make_entry(&format!("chunk_entry_{i}"));
+        ws.send(entry_msg(&entry)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    ws.send(sync_msg(100)).await.unwrap();
+
+    // Should receive 3 chunks: [3, 3, 1] with done=false, false, true
+    let mut all_entries = Vec::new();
+    let mut chunk_count = 0;
+    loop {
+        let text = recv_text(&mut ws).await;
+        match parse_server_msg(&text) {
+            ServerMessage::SyncResponse { entries, done } => {
+                chunk_count += 1;
+                all_entries.extend(entries);
+                if done {
+                    break;
+                }
+            }
+            other => panic!("expected SyncResponse, got {:?}", other),
+        }
+    }
+
+    assert_eq!(
+        all_entries.len(),
+        7,
+        "all 7 entries should arrive across chunks"
+    );
+    assert!(
+        chunk_count >= 2,
+        "should have multiple chunks, got {chunk_count}"
+    );
 }
 
 #[tokio::test]
@@ -184,7 +235,7 @@ async fn dedup_prevents_duplicate_storage() {
     let text = recv_text(&mut ws).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert_eq!(
                 entries.len(),
                 1,
@@ -211,7 +262,7 @@ async fn multiple_unique_entries_all_stored() {
     let text = recv_text(&mut ws).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert_eq!(entries.len(), 10);
         }
         other => panic!("expected SyncResponse, got {:?}", other),
@@ -393,7 +444,7 @@ async fn sync_request_returns_entries_newest_first() {
     let text = recv_text(&mut ws).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert_eq!(entries.len(), 3);
             assert!(entries[0].content.contains("4"));
             assert!(entries[1].content.contains("3"));
@@ -424,7 +475,7 @@ async fn sync_batch_capped_by_server() {
     let text = recv_text(&mut ws).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert_eq!(entries.len(), 3);
         }
         other => panic!("expected SyncResponse, got {:?}", other),
@@ -445,7 +496,7 @@ async fn server_recomputes_hash() {
     let text = recv_text(&mut ws).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert_eq!(entries.len(), 1);
             assert_ne!(entries[0].hash, "totally_fake_hash_value");
             let expected = entries[0].compute_server_hash();
@@ -474,7 +525,7 @@ async fn rapid_copy_burst_with_dedup() {
     let text = recv_text(&mut ws).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert_eq!(
                 entries.len(),
                 10,
@@ -523,7 +574,7 @@ async fn two_clients_rapid_fire_interleaved() {
     let text = recv_text(&mut ws1).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert_eq!(entries.len(), 30, "30 unique entries from 2 clients");
         }
         other => panic!("expected SyncResponse, got {:?}", other),
@@ -539,7 +590,7 @@ async fn empty_sync_request() {
     let text = recv_text(&mut ws).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert!(entries.is_empty());
         }
         other => panic!("expected SyncResponse, got {:?}", other),
@@ -568,7 +619,7 @@ async fn different_content_types_not_deduped() {
     let text = recv_text(&mut ws).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert_eq!(
                 entries.len(),
                 2,
@@ -638,7 +689,7 @@ async fn storage_limit_enforced() {
     let text = recv_text(&mut ws).await;
 
     match parse_server_msg(&text) {
-        ServerMessage::SyncResponse { entries } => {
+        ServerMessage::SyncResponse { entries, .. } => {
             assert!(
                 entries.len() <= 5,
                 "enforce_limit should cap at 5, got {}",

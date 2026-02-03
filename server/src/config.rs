@@ -24,6 +24,11 @@ pub struct ServerConfig {
     #[serde(default = "default_max_sync_batch")]
     pub max_sync_batch: usize,
 
+    /// Number of entries per sync chunk. Large sync responses are split
+    /// into chunks of this size to avoid broken-pipe on slow connections.
+    #[serde(default = "default_sync_chunk_size")]
+    pub sync_chunk_size: usize,
+
     /// Rate limit: max messages per 60s window per client.
     #[serde(default = "default_rate_msg")]
     pub rate_limit_messages: u32,
@@ -68,6 +73,9 @@ fn default_max_entry_bytes() -> usize {
 fn default_max_sync_batch() -> usize {
     200
 }
+fn default_sync_chunk_size() -> usize {
+    10
+}
 fn default_rate_msg() -> u32 {
     60
 }
@@ -86,6 +94,7 @@ impl Default for ServerConfig {
             max_entries: default_max_entries(),
             max_entry_bytes: default_max_entry_bytes(),
             max_sync_batch: default_max_sync_batch(),
+            sync_chunk_size: default_sync_chunk_size(),
             rate_limit_messages: default_rate_msg(),
             rate_limit_bytes: default_rate_bytes(),
             rate_limit_max_message_size: default_max_msg_size(),

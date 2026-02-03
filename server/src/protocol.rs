@@ -73,8 +73,13 @@ pub enum ServerMessage {
     ClipboardEntry(ClipboardEntry),
 
     /// Response to sync_request: a batch of recent entries.
+    /// When `done` is true, this is the last chunk of the sync.
     #[serde(rename = "sync_response")]
-    SyncResponse { entries: Vec<ClipboardEntry> },
+    SyncResponse {
+        entries: Vec<ClipboardEntry>,
+        #[serde(default)]
+        done: bool,
+    },
 
     /// Authentication result.
     #[serde(rename = "auth_result")]

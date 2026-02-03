@@ -190,43 +190,9 @@ async fn handle_client_message(
                 return;
             }
 
-            // Server-side dedup: skip if server hash already exists (but still bump timestamp)
-            match state.store.has_hash(&entry.hash) {
-                Ok(true) => {
-                    tracing::debug!(
-                        "dedup: bumping existing entry with hash {} from {client_id}",
-                        &entry.hash[..16]
-                    );
-                    let _ = state.store.insert(&entry, client_id, &client_hash);
-                    return;
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!("db error checking hash: {e}");
-                }
-            }
-
-            // Cross-format dedup: check if the client-computed hash already exists.
-            // This catches duplicate images that differ in format (PNG vs DibV5)
-            // but contain the same pixel data.
-            if !client_hash.is_empty() {
-                match state.store.has_client_hash(&client_hash) {
-                    Ok(true) => {
-                        tracing::debug!(
-                            "dedup: skipping cross-format duplicate (client_hash {}) from {client_id}",
-                            &client_hash[..client_hash.len().min(16)]
-                        );
-                        let _ = state.store.insert(&entry, client_id, &client_hash);
-                        return;
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::warn!("db error checking client_hash: {e}");
-                    }
-                }
-            }
-
-            // Store in server DB
+            // Store in server DB.
+            // ON CONFLICT bumps created_at to the top without creating a duplicate row,
+            // so repeated copies of the same content just resurface the existing entry.
             match state.store.insert(&entry, client_id, &client_hash) {
                 Ok(true) => {
                     tracing::info!(
@@ -262,12 +228,33 @@ async fn handle_client_message(
             let capped = limit.min(state.config.max_sync_batch);
             match state.store.recent(capped, state.config.max_sync_batch) {
                 Ok(entries) => {
+                    let total = entries.len();
                     tracing::info!(
-                        "sync_request from {client_id}: sending {} entries",
-                        entries.len()
+                        "sync_request from {client_id}: sending {total} entries in chunks of {}",
+                        state.config.sync_chunk_size
                     );
-                    let resp = ServerMessage::SyncResponse { entries };
-                    let _ = send_msg(sink, &resp).await;
+                    let chunk_size = state.config.sync_chunk_size.max(1);
+                    let mut chunks = entries.chunks(chunk_size).peekable();
+
+                    // Handle empty result
+                    if total == 0 {
+                        let resp = ServerMessage::SyncResponse {
+                            entries: vec![],
+                            done: true,
+                        };
+                        let _ = send_msg(sink, &resp).await;
+                    } else {
+                        while let Some(chunk) = chunks.next() {
+                            let is_last = chunks.peek().is_none();
+                            let resp = ServerMessage::SyncResponse {
+                                entries: chunk.to_vec(),
+                                done: is_last,
+                            };
+                            if send_msg(sink, &resp).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("failed to query recent entries: {e}");
