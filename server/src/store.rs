@@ -6,6 +6,18 @@ use rusqlite::{Connection, params};
 
 use crate::protocol::ClipboardEntry;
 
+/// A record in the `files` table.
+#[derive(Debug, Clone)]
+pub struct FileRecord {
+    pub file_id: String,
+    pub filename: String,
+    pub disk_path: String,
+    pub size: i64,
+    pub mime_type: String,
+    pub ref_count: i64,
+    pub created_at: String,
+}
+
 /// Server-side SQLite store. Thread-safe via internal Mutex.
 pub struct Store {
     conn: Mutex<Connection>,
@@ -62,6 +74,20 @@ impl Store {
                  CREATE INDEX IF NOT EXISTS idx_entries_client_hash ON entries(client_hash);",
             )?;
         }
+
+        // Migration: add files table for on-disk file storage
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS files (
+                file_id    TEXT PRIMARY KEY,
+                filename   TEXT NOT NULL,
+                disk_path  TEXT NOT NULL,
+                size       INTEGER NOT NULL,
+                mime_type  TEXT NOT NULL DEFAULT '',
+                ref_count  INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_files_created ON files(created_at);",
+        )?;
 
         Ok(())
     }
@@ -170,6 +196,111 @@ impl Store {
             [],
             |row| row.get(0),
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // File storage methods
+    // -----------------------------------------------------------------------
+
+    /// Insert a file record. If the file_id already exists, increment ref_count.
+    /// Returns true if a new record was created.
+    pub fn insert_file(
+        &self,
+        file_id: &str,
+        filename: &str,
+        disk_path: &str,
+        size: i64,
+        mime_type: &str,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changes = conn.execute(
+            "INSERT INTO files (file_id, filename, disk_path, size, mime_type, ref_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
+             ON CONFLICT(file_id) DO UPDATE SET ref_count = ref_count + 1",
+            params![
+                file_id,
+                filename,
+                disk_path,
+                size,
+                mime_type,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(changes > 0)
+    }
+
+    /// Look up a file by ID.
+    pub fn get_file(&self, file_id: &str) -> rusqlite::Result<Option<FileRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT file_id, filename, disk_path, size, mime_type, ref_count, created_at
+             FROM files WHERE file_id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![file_id], |row| {
+            Ok(FileRecord {
+                file_id: row.get(0)?,
+                filename: row.get(1)?,
+                disk_path: row.get(2)?,
+                size: row.get(3)?,
+                mime_type: row.get(4)?,
+                ref_count: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(record)) => Ok(Some(record)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    /// Decrement ref_count for a file. Returns true if ref_count reached 0
+    /// (caller should delete from disk).
+    pub fn dec_file_ref(&self, file_id: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE files SET ref_count = ref_count - 1 WHERE file_id = ?1",
+            params![file_id],
+        )?;
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT ref_count FROM files WHERE file_id = ?1",
+                params![file_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if remaining <= 0 {
+            conn.execute("DELETE FROM files WHERE file_id = ?1", params![file_id])?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Total stored file size (bytes).
+    pub fn total_file_bytes(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COALESCE(SUM(size), 0) FROM files", [], |row| {
+            row.get(0)
+        })
+    }
+
+    /// Get IDs of entries that will be deleted by enforce_limit.
+    /// Returns (id, content_type, content) tuples.
+    pub fn entries_to_prune(
+        &self,
+        max_entries: usize,
+    ) -> rusqlite::Result<Vec<(i64, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, content_type, content FROM entries WHERE id NOT IN (
+                SELECT id FROM entries ORDER BY created_at DESC LIMIT ?1
+            )",
+        )?;
+        let rows = stmt.query_map(params![max_entries as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect()
     }
 }
 

@@ -230,6 +230,12 @@ impl App {
                     self.status_message = Some("Failed to set files on clipboard".to_string());
                 }
             }
+            crate::clipboard::ClipboardContent::SyncedFiles(refs) => {
+                self.status_message = Some(format!(
+                    "{} synced file(s) — select and download first",
+                    refs.len()
+                ));
+            }
             crate::clipboard::ClipboardContent::Image(info) => {
                 if info.raw_data.is_none() {
                     self.status_message =

@@ -4,10 +4,26 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Metadata for a file stored on the sync server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileRef {
+    /// Server-assigned ID (SHA-256 hash of file content).
+    pub file_id: String,
+    /// Original filename (basename only).
+    pub filename: String,
+    /// File size in bytes.
+    pub size: u64,
+    /// MIME type.
+    pub mime_type: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClipboardContent {
     /// One or more file paths copied via Explorer (CF_HDROP).
     Files(Vec<PathBuf>),
+
+    /// Files synced from a remote device with server-stored content.
+    SyncedFiles(Vec<FileRef>),
 
     /// An image copied to the clipboard (CF_DIB / CF_BITMAP / PNG).
     Image(ImageInfo),
@@ -44,6 +60,15 @@ impl ClipboardContent {
                 sorted.sort();
                 for p in &sorted {
                     hasher.update(p.as_bytes());
+                    hasher.update(b"\0");
+                }
+            }
+            Self::SyncedFiles(refs) => {
+                hasher.update(b"files:");
+                let mut sorted: Vec<_> = refs.iter().map(|r| r.file_id.clone()).collect();
+                sorted.sort();
+                for id in &sorted {
+                    hasher.update(id.as_bytes());
                     hasher.update(b"\0");
                 }
             }
@@ -101,6 +126,13 @@ impl ClipboardContent {
                     format!("{} files", paths.len())
                 }
             }
+            Self::SyncedFiles(refs) => {
+                if refs.len() == 1 {
+                    refs[0].filename.clone()
+                } else {
+                    format!("{} files", refs.len())
+                }
+            }
             Self::Image(info) => {
                 format!("{}x{} {:?}", info.width, info.height, info.format)
             }
@@ -114,6 +146,7 @@ impl ClipboardContent {
             Self::Text(_) => "text",
             Self::Url(_) => "url",
             Self::Files(_) => "files",
+            Self::SyncedFiles(_) => "files",
             Self::Image(_) => "image",
             Self::Empty => "empty",
         }
@@ -125,6 +158,7 @@ impl ClipboardContent {
             Self::Text(t) => t.len(),
             Self::Url(u) => u.len(),
             Self::Files(paths) => paths.iter().map(|p| p.to_string_lossy().len()).sum(),
+            Self::SyncedFiles(refs) => refs.iter().map(|r| r.size as usize).sum(),
             Self::Image(info) => info.data_size,
             Self::Empty => 0,
         }
@@ -200,6 +234,13 @@ impl fmt::Display for ClipboardContent {
                 write!(f, "Files({} item(s))", paths.len())?;
                 for p in paths {
                     write!(f, "\n  {}", p.display())?;
+                }
+                Ok(())
+            }
+            Self::SyncedFiles(refs) => {
+                write!(f, "SyncedFiles({} item(s))", refs.len())?;
+                for r in refs {
+                    write!(f, "\n  {} ({} bytes)", r.filename, r.size)?;
                 }
                 Ok(())
             }

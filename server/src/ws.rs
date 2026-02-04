@@ -9,6 +9,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 
 use crate::config::ServerConfig;
+use crate::file_store::FileStore;
 use crate::protocol::{ClientMessage, ClipboardEntry, ServerMessage};
 use crate::rate_limit::{RateLimitResult, RateLimiter};
 use crate::store::Store;
@@ -16,6 +17,7 @@ use crate::store::Store;
 /// Shared application state passed to each WebSocket handler.
 pub struct AppState {
     pub store: Store,
+    pub file_store: FileStore,
     pub rate_limiter: RateLimiter,
     pub broadcast_tx: broadcast::Sender<BroadcastEvent>,
     pub config: ServerConfig,
@@ -214,8 +216,8 @@ async fn handle_client_message(
                 }
             }
 
-            // Enforce server-side storage limit
-            let _ = state.store.enforce_limit(state.config.max_entries);
+            // Enforce server-side storage limit, cleaning up associated files
+            cleanup_pruned_files(&state);
 
             // Broadcast to other connected clients
             let _ = state.broadcast_tx.send(BroadcastEvent {
@@ -295,5 +297,64 @@ fn truncate(s: &str, max: usize) -> &str {
         &s[..s.floor_char_boundary(max)]
     } else {
         s
+    }
+}
+
+/// Identify entries that will be pruned, clean up their associated files,
+/// then enforce the entry limit.
+pub fn cleanup_pruned_files(state: &AppState) {
+    // Find entries about to be pruned
+    if let Ok(to_prune) = state.store.entries_to_prune(state.config.max_entries) {
+        for (_id, content_type, content) in &to_prune {
+            if content_type == "files" {
+                // Try to parse as SyncedFiles to extract file_ids
+                extract_and_cleanup_file_refs(content, state);
+            }
+        }
+    }
+    let _ = state.store.enforce_limit(state.config.max_entries);
+}
+
+/// Parse content JSON to extract FileRef file_ids and decrement their ref_count.
+/// If ref_count reaches 0, delete the file from disk.
+fn extract_and_cleanup_file_refs(content: &str, state: &AppState) {
+    // The content is JSON-serialized ClipboardContent.
+    // SyncedFiles variant serializes as: {"SyncedFiles":[{...}, ...]}
+    // Try to extract file_id values from the JSON.
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(content);
+    let file_ids: Vec<String> = match parsed {
+        Ok(serde_json::Value::Object(map)) => {
+            if let Some(serde_json::Value::Array(refs)) = map.get("SyncedFiles") {
+                refs.iter()
+                    .filter_map(|v| {
+                        v.get("file_id")
+                            .and_then(|id| id.as_str())
+                            .map(String::from)
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }
+        }
+        _ => vec![],
+    };
+
+    for file_id in file_ids {
+        match state.store.dec_file_ref(&file_id) {
+            Ok(true) => {
+                // ref_count reached 0, delete from disk
+                if let Err(e) = state.file_store.delete(&file_id) {
+                    tracing::warn!("failed to delete file {file_id} from disk: {e}");
+                } else {
+                    tracing::info!("deleted file {file_id} (ref_count=0)");
+                }
+            }
+            Ok(false) => {
+                tracing::debug!("decremented ref_count for file {file_id}");
+            }
+            Err(e) => {
+                tracing::warn!("failed to decrement file ref for {file_id}: {e}");
+            }
+        }
     }
 }

@@ -284,6 +284,14 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &mut App) {
                     .map(|p| p.to_string_lossy().to_string())
                     .collect::<Vec<_>>()
                     .join("\n"),
+                crate::clipboard::ClipboardContent::SyncedFiles(refs) => {
+                    let header = format!("{} synced file(s):\n", refs.len());
+                    let list: Vec<String> = refs
+                        .iter()
+                        .map(|r| format!("  {} ({:.1} KB)", r.filename, r.size as f64 / 1024.0))
+                        .collect();
+                    header + &list.join("\n")
+                }
                 _ => entry.content.clone(),
             })
             .unwrap_or_else(|| entry.content.clone()),

@@ -1,4 +1,6 @@
 mod config;
+mod file_store;
+mod files;
 mod protocol;
 mod rate_limit;
 mod store;
@@ -10,13 +12,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
 use config::ServerConfig;
+use file_store::FileStore;
+use files::{file_download_handler, file_upload_handler};
 use rate_limit::{RateLimitConfig, RateLimiter};
 use store::Store;
 use ws::{AppState, handle_socket};
@@ -64,6 +68,16 @@ async fn main() {
         total_bytes as f64 / (1024.0 * 1024.0)
     );
 
+    // Open file store
+    let files_dir = config.files_dir();
+    let file_store = FileStore::new(files_dir.clone()).expect("failed to create file store");
+    tracing::info!("file store: {}", files_dir.display());
+    tracing::info!(
+        "file limits: max_file_size={}, max_total={}",
+        config.max_file_size,
+        config.max_total_file_storage
+    );
+
     // Create broadcast channel (capacity 256; lagging receivers drop old messages)
     let (broadcast_tx, _) = broadcast::channel(256);
 
@@ -77,6 +91,7 @@ async fn main() {
 
     let state = Arc::new(AppState {
         store,
+        file_store,
         rate_limiter,
         broadcast_tx,
         config: config.clone(),
@@ -90,12 +105,9 @@ async fn main() {
             loop {
                 interval.tick().await;
                 state.rate_limiter.cleanup_stale();
-                if let Err(e) = state.store.enforce_limit(state.config.max_entries) {
-                    tracing::warn!("periodic prune failed: {e}");
-                } else {
-                    let count = state.store.count().unwrap_or(0);
-                    tracing::debug!("periodic prune done, {count} entries remain");
-                }
+                ws::cleanup_pruned_files(&state);
+                let count = state.store.count().unwrap_or(0);
+                tracing::debug!("periodic prune done, {count} entries remain");
             }
         });
     }
@@ -104,6 +116,9 @@ async fn main() {
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health_handler))
+        .route("/files/upload", post(file_upload_handler))
+        .route("/files/{file_id}", get(file_download_handler))
+        .layer(DefaultBodyLimit::max(config.max_file_size + 4096))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

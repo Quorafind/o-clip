@@ -2,6 +2,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Metadata for a file stored on the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileRef {
+    /// Server-assigned ID (SHA-256 hash of file content).
+    pub file_id: String,
+    /// Original filename (basename only).
+    pub filename: String,
+    /// File size in bytes.
+    pub size: u64,
+    /// MIME type (best-effort detection).
+    pub mime_type: String,
+}
+
 /// A clipboard entry exchanged between client and server.
 /// This mirrors the client's `ClipboardEntry` but is self-contained.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -56,6 +56,18 @@ pub struct ServerConfig {
     #[serde(default)]
     pub tls_key: Option<String>,
 
+    /// Directory for storing uploaded files. Relative to config_dir.
+    #[serde(default = "default_files_dir")]
+    pub files_dir: String,
+
+    /// Maximum single file size for upload (bytes). Default: 50 MB.
+    #[serde(default = "default_max_file_size")]
+    pub max_file_size: usize,
+
+    /// Maximum total file storage on disk (bytes). Default: 1 GB.
+    #[serde(default = "default_max_total_file_storage")]
+    pub max_total_file_storage: u64,
+
     /// Resolved directory of the config file (not serialized).
     #[serde(skip)]
     pub config_dir: PathBuf,
@@ -85,6 +97,15 @@ fn default_rate_bytes() -> u64 {
 fn default_max_msg_size() -> usize {
     6 * 1024 * 1024 // 6 MB — slightly above max_entry_bytes to account for JSON overhead
 }
+fn default_files_dir() -> String {
+    "files".to_string()
+}
+fn default_max_file_size() -> usize {
+    50 * 1024 * 1024 // 50 MB
+}
+fn default_max_total_file_storage() -> u64 {
+    1024 * 1024 * 1024 // 1 GB
+}
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -101,6 +122,9 @@ impl Default for ServerConfig {
             password: None,
             tls_cert: None,
             tls_key: None,
+            files_dir: default_files_dir(),
+            max_file_size: default_max_file_size(),
+            max_total_file_storage: default_max_total_file_storage(),
             config_dir: PathBuf::from("."),
         }
     }
@@ -153,6 +177,21 @@ impl ServerConfig {
             self.config_dir.join("clipboard_server.db")
         } else {
             PathBuf::from(&self.db_path)
+        }
+    }
+
+    /// Resolve the files directory path.
+    /// Relative paths are resolved relative to the config directory.
+    pub fn files_dir(&self) -> PathBuf {
+        if self.files_dir.is_empty() {
+            self.config_dir.join("files")
+        } else {
+            let p = PathBuf::from(&self.files_dir);
+            if p.is_absolute() {
+                p
+            } else {
+                self.config_dir.join(p)
+            }
         }
     }
 

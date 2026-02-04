@@ -2,6 +2,7 @@ mod app;
 mod clipboard;
 mod config;
 mod error;
+mod file_transfer;
 mod store;
 mod sync;
 mod tui;
@@ -27,8 +28,26 @@ use clipboard::ClipboardEvent;
 #[cfg(target_os = "windows")]
 use clipboard::ClipboardMonitor;
 use config::{Cli, Config};
+use file_transfer::FileTransferClient;
 use store::{ClipboardEntry, EntrySource, Store};
 use sync::SyncEvent;
+
+/// Request from main thread to tokio runtime for file operations.
+enum FileRequest {
+    /// Upload local files to server, then send the resulting SyncedFiles entry via WS.
+    Upload {
+        entry: ClipboardEntry,
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// Download SyncedFiles from server.
+    Download { refs: Vec<clipboard::FileRef> },
+}
+
+/// Response from tokio runtime back to main thread.
+enum FileResponse {
+    /// Files downloaded successfully; set these local paths on the clipboard.
+    Downloaded(Vec<std::path::PathBuf>),
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments and load configuration
@@ -70,22 +89,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sync size limit: entries larger than this are stored locally only
     let max_sync_size = config.server.max_sync_size;
 
-    // Spawn tokio runtime for WebSocket sync
+    // File transfer channels (main thread <-> tokio runtime)
+    let (file_req_tx, mut file_req_rx) = tokio::sync::mpsc::unbounded_channel::<FileRequest>();
+    let (file_resp_tx, file_resp_rx) = std::sync::mpsc::channel::<FileResponse>();
+
+    // Spawn tokio runtime for WebSocket sync + file transfer
     let ws_url = config.server.url.clone();
     let accept_invalid_certs = config.server.accept_invalid_certs;
     let ws_password = config.server.password.clone();
     let has_server = config.has_server() && config.server.auto_connect;
+    let max_file_sync_size = config.server.max_file_sync_size;
+    let download_dir = config.download_dir();
     let reconnect_notify = Arc::new(tokio::sync::Notify::new());
     let reconnect_notify_sync = reconnect_notify.clone();
+    let ws_outbound_tx_clone = ws_outbound_tx.clone();
     let _rt_handle = std::thread::spawn(move || {
         if !has_server {
             return;
         }
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .worker_threads(1)
+            .worker_threads(2)
             .build()
             .expect("failed to build tokio runtime");
+
+        // Create file transfer client
+        let file_client = Arc::new(FileTransferClient::new(
+            &ws_url,
+            ws_password.clone(),
+            accept_invalid_certs,
+            max_file_sync_size,
+            download_dir,
+        ));
+
+        // Spawn file transfer request handler
+        let fc = file_client.clone();
+        let ws_tx = ws_outbound_tx_clone;
+        let resp_tx = file_resp_tx;
+        rt.spawn(async move {
+            while let Some(req) = file_req_rx.recv().await {
+                match req {
+                    FileRequest::Upload { mut entry, paths } => {
+                        match fc.upload_files(&paths).await {
+                            Ok(file_refs) => {
+                                // Replace content with SyncedFiles
+                                let synced = clipboard::ClipboardContent::SyncedFiles(file_refs);
+                                let content_json =
+                                    serde_json::to_string(&synced).unwrap_or_default();
+                                entry.content = content_json;
+                                entry.hash = synced.content_hash();
+                                entry.byte_size = synced.byte_size() as i64;
+                                entry.preview = synced.preview(120);
+                                let _ = ws_tx.send(entry);
+                                tracing::info!("file upload complete, sent SyncedFiles entry");
+                            }
+                            Err(e) => {
+                                tracing::warn!("file upload failed: {e}");
+                            }
+                        }
+                    }
+                    FileRequest::Download { refs } => match fc.download_files(&refs).await {
+                        Ok(local_paths) => {
+                            let _ = resp_tx.send(FileResponse::Downloaded(local_paths));
+                        }
+                        Err(e) => {
+                            tracing::warn!("file download failed: {e}");
+                        }
+                    },
+                }
+            }
+        });
+
         rt.block_on(sync::run_sync(
             ws_url,
             accept_invalid_certs,
@@ -202,14 +276,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "skipping outbound sync for recently auto-copied remote content: {}",
                     &content_hash[..16]
                 );
-            } else if !event.no_cloud && (entry.byte_size as usize) <= max_sync_size {
-                let _ = ws_outbound_tx.send(entry.clone());
-            } else if (entry.byte_size as usize) > max_sync_size {
-                tracing::debug!(
-                    "skipping sync for large entry: {} bytes (limit {})",
-                    entry.byte_size,
-                    max_sync_size
-                );
+            } else if !event.no_cloud {
+                // Check if this is a Files entry that should be uploaded
+                let is_files = matches!(&event.content, clipboard::ClipboardContent::Files(_));
+                if is_files {
+                    // Extract paths and send to file upload handler
+                    if let clipboard::ClipboardContent::Files(paths) = &event.content {
+                        let _ = file_req_tx.send(FileRequest::Upload {
+                            entry: entry.clone(),
+                            paths: paths.clone(),
+                        });
+                        tracing::info!("queued {} file(s) for upload", paths.len());
+                    }
+                } else if (entry.byte_size as usize) <= max_sync_size {
+                    let _ = ws_outbound_tx.send(entry.clone());
+                } else {
+                    tracing::debug!(
+                        "skipping sync for large entry: {} bytes (limit {})",
+                        entry.byte_size,
+                        max_sync_size
+                    );
+                }
             }
             app.on_new_entry(entry);
         }
@@ -228,6 +315,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(content) = entry.to_clipboard_content() {
                         let pixel_hash = content.content_hash();
                         recent_remote_hashes.insert(pixel_hash, Instant::now());
+
+                        // If this is a SyncedFiles entry, trigger async download
+                        if let clipboard::ClipboardContent::SyncedFiles(refs) = &content {
+                            let _ = file_req_tx.send(FileRequest::Download { refs: refs.clone() });
+                            tracing::info!("queued {} file(s) for download", refs.len());
+                        }
                     }
 
                     // Recompute client-side hash so the local DB dedup works
@@ -247,6 +340,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 SyncEvent::StatusChanged(status) => {
                     app.ws_status = status;
+                }
+            }
+        }
+
+        // Process file download responses (non-blocking)
+        while let Ok(resp) = file_resp_rx.try_recv() {
+            match resp {
+                FileResponse::Downloaded(local_paths) => {
+                    tracing::info!("files downloaded: {} file(s)", local_paths.len());
+                    // Remember hash to prevent echo
+                    let content = clipboard::ClipboardContent::Files(local_paths.clone());
+                    let hash = content.content_hash();
+                    recent_remote_hashes.insert(hash, Instant::now());
+
+                    // Set clipboard
+                    clipboard::mark_self_write();
+                    if app::set_clipboard_files_public(&local_paths) {
+                        app.status_message = Some(format!(
+                            "Downloaded {} file(s) to clipboard",
+                            local_paths.len()
+                        ));
+                    }
                 }
             }
         }
@@ -311,6 +426,10 @@ fn auto_copy_to_clipboard(entry: &ClipboardEntry) {
         }
         ClipboardContent::Files(paths) => {
             app::set_clipboard_files_public(paths);
+        }
+        ClipboardContent::SyncedFiles(_) => {
+            // SyncedFiles are downloaded asynchronously via the file transfer channel.
+            // Don't set clipboard here — it will be set when the download completes.
         }
         ClipboardContent::Image(info) => {
             app::set_clipboard_image_public(info);

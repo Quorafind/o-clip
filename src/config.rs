@@ -40,6 +40,12 @@ pub struct ServerConfig {
     /// Password for server authentication. Must match the server's configured password.
     #[serde(default)]
     pub password: Option<String>,
+    /// Maximum file size (per file) to sync to the server. Default: 50 MB.
+    #[serde(default = "default_max_file_sync_size")]
+    pub max_file_sync_size: u64,
+    /// Directory for storing downloaded files. Empty = platform default.
+    #[serde(default)]
+    pub download_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +67,10 @@ impl Default for Config {
     }
 }
 
+fn default_max_file_sync_size() -> u64 {
+    50 * 1024 * 1024 // 50 MB
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -69,6 +79,8 @@ impl Default for ServerConfig {
             max_sync_size: default_max_sync_size(),
             accept_invalid_certs: false,
             password: None,
+            max_file_sync_size: default_max_file_sync_size(),
+            download_dir: String::new(),
         }
     }
 }
@@ -135,6 +147,17 @@ impl Config {
             .map(|dirs| dirs.data_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."))
             .join("clipboard.db")
+    }
+
+    /// Resolve the download directory for synced files.
+    pub fn download_dir(&self) -> PathBuf {
+        if !self.server.download_dir.is_empty() {
+            return PathBuf::from(&self.server.download_dir);
+        }
+        directories::ProjectDirs::from("", "", "o-clip")
+            .map(|dirs| dirs.data_dir().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("files")
     }
 
     /// Whether WebSocket sync is configured.

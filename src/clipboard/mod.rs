@@ -6,7 +6,7 @@ pub mod monitor_mac;
 #[cfg(target_os = "windows")]
 pub mod reader;
 
-pub use content::ClipboardContent;
+pub use content::{ClipboardContent, FileRef};
 #[cfg(target_os = "windows")]
 pub use monitor::ClipboardMonitor;
 
