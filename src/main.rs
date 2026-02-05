@@ -357,9 +357,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Set clipboard
                     clipboard::mark_self_write();
                     if app::set_clipboard_files_public(&local_paths) {
+                        let dir_display = local_paths
+                            .first()
+                            .and_then(|p| p.parent())
+                            .map(|d| d.to_string_lossy().to_string())
+                            .unwrap_or_default();
                         app.status_message = Some(format!(
-                            "Downloaded {} file(s) to clipboard",
-                            local_paths.len()
+                            "Downloaded {} file(s) -> {}",
+                            local_paths.len(),
+                            dir_display,
                         ));
                     }
                 }

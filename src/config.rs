@@ -150,10 +150,18 @@ impl Config {
     }
 
     /// Resolve the download directory for synced files.
+    /// Defaults to the system Downloads folder if not configured.
     pub fn download_dir(&self) -> PathBuf {
         if !self.server.download_dir.is_empty() {
             return PathBuf::from(&self.server.download_dir);
         }
+        // Use system Downloads folder as default (more discoverable than AppData)
+        if let Some(user_dirs) = directories::UserDirs::new() {
+            if let Some(dl) = user_dirs.download_dir() {
+                return dl.join("o-clip");
+            }
+        }
+        // Fallback to data dir
         directories::ProjectDirs::from("", "", "o-clip")
             .map(|dirs| dirs.data_dir().to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."))
@@ -166,12 +174,17 @@ impl Config {
     }
 
     /// Write the default config to disk if it doesn't exist.
+    /// Pre-fills download_dir with the resolved default path so users can see and edit it.
     pub fn write_default_if_missing(path: &Path) {
         if !path.exists() {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let default_toml = toml::to_string_pretty(&Config::default()).unwrap_or_default();
+            let mut cfg = Config::default();
+            // Pre-fill download_dir with the resolved default so users can discover & edit it
+            let resolved = cfg.download_dir();
+            cfg.server.download_dir = resolved.to_string_lossy().to_string();
+            let default_toml = toml::to_string_pretty(&cfg).unwrap_or_default();
             let _ = std::fs::write(path, default_toml);
         }
     }
