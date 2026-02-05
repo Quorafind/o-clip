@@ -187,6 +187,7 @@ impl FileTransferClient {
     }
 
     /// Get the download directory path.
+    #[allow(dead_code)]
     pub fn download_dir(&self) -> &Path {
         &self.download_dir
     }

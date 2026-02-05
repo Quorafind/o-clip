@@ -258,7 +258,10 @@ mod inner {
             if let Some(path_nsstring) = path_str {
                 let cstr: *const std::ffi::c_char = msg_send![&*path_nsstring, UTF8String];
                 if !cstr.is_null() {
-                    let path = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+                    // SAFETY: cstr is a valid C string from NSString.UTF8String
+                    let path = unsafe { std::ffi::CStr::from_ptr(cstr) }
+                        .to_string_lossy()
+                        .to_string();
                     paths.push(std::path::PathBuf::from(path));
                 }
             }
@@ -281,7 +284,8 @@ mod inner {
             let length: usize = msg_send![&*data, length];
             if length > 0 {
                 let bytes_ptr: *const u8 = msg_send![&*data, bytes];
-                let bytes = std::slice::from_raw_parts(bytes_ptr, length);
+                // SAFETY: bytes_ptr is valid for length bytes from NSData
+                let bytes = unsafe { std::slice::from_raw_parts(bytes_ptr, length) };
                 return Some(bytes.to_vec());
             }
         }
@@ -312,7 +316,8 @@ mod inner {
                         let png_len: usize = msg_send![&*png_data, length];
                         if png_len > 0 {
                             let png_ptr: *const u8 = msg_send![&*png_data, bytes];
-                            let png_bytes = std::slice::from_raw_parts(png_ptr, png_len);
+                            // SAFETY: png_ptr is valid for png_len bytes from NSData
+                            let png_bytes = unsafe { std::slice::from_raw_parts(png_ptr, png_len) };
                             return Some(png_bytes.to_vec());
                         }
                     }

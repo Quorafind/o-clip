@@ -1,14 +1,17 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum ClipboardError {
     #[cfg(target_os = "windows")]
     #[error("failed to open clipboard: {0}")]
     OpenFailed(windows::core::Error),
 
+    #[cfg(target_os = "windows")]
     #[error("clipboard data unavailable for format {0}")]
     DataUnavailable(u32),
 
+    #[cfg(target_os = "windows")]
     #[error("failed to lock global memory")]
     GlobalLockFailed,
 
@@ -25,6 +28,7 @@ pub enum ClipboardError {
     Windows(#[from] windows::core::Error),
 }
 
+#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, ClipboardError>;
 
 #[derive(Debug, Error)]
