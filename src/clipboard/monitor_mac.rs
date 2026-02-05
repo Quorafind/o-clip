@@ -113,6 +113,13 @@ mod inner {
                     return false;
                 }
                 last_change_count = change_count;
+
+                // Skip self-initiated clipboard writes (mirrors Windows monitor behaviour).
+                if crate::clipboard::take_self_write() {
+                    tracing::debug!("macOS: skipping self-initiated clipboard write");
+                    return false;
+                }
+
                 tracing::debug!("macOS: clipboard change detected (count: {change_count})");
 
                 // Check sensitivity

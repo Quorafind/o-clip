@@ -354,6 +354,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let hash = content.content_hash();
                     recent_remote_hashes.insert(hash, Instant::now());
 
+                    // Defense in depth: on macOS, set_clipboard_files writes
+                    // paths as plain text, so also remember the text hash the
+                    // clipboard monitor will actually read back.
+                    #[cfg(target_os = "macos")]
+                    {
+                        let text = local_paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let text_content = clipboard::content::classify_text(text);
+                        let text_hash = text_content.content_hash();
+                        recent_remote_hashes.insert(text_hash, Instant::now());
+                    }
+
                     // Set clipboard
                     clipboard::mark_self_write();
                     if app::set_clipboard_files_public(&local_paths) {
