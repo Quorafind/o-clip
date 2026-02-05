@@ -415,23 +415,29 @@ fn auto_copy_to_clipboard(entry: &ClipboardEntry) {
         return;
     };
 
-    clipboard::mark_self_write();
-
+    // Only mark_self_write() when we actually write to the clipboard.
+    // Calling it without a subsequent clipboard write would cause the monitor
+    // to incorrectly skip the next *real* clipboard change.
     match &content {
         ClipboardContent::Text(t) => {
+            clipboard::mark_self_write();
             app::set_clipboard_text_public(t);
         }
         ClipboardContent::Url(u) => {
+            clipboard::mark_self_write();
             app::set_clipboard_text_public(u);
         }
         ClipboardContent::Files(paths) => {
+            clipboard::mark_self_write();
             app::set_clipboard_files_public(paths);
         }
         ClipboardContent::SyncedFiles(_) => {
             // SyncedFiles are downloaded asynchronously via the file transfer channel.
             // Don't set clipboard here — it will be set when the download completes.
+            // Do NOT call mark_self_write() since we're not writing to the clipboard.
         }
         ClipboardContent::Image(info) => {
+            clipboard::mark_self_write();
             app::set_clipboard_image_public(info);
         }
         ClipboardContent::Empty => {}
