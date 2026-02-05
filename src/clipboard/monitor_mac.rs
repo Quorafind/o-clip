@@ -129,6 +129,22 @@ mod inner {
                     return false;
                 }
 
+                // Try to read file URLs first (higher priority than text)
+                if let Some(file_paths) = read_file_urls(&pasteboard) {
+                    if !file_paths.is_empty() {
+                        tracing::debug!("macOS: captured {} file(s)", file_paths.len());
+                        let content = ClipboardContent::Files(file_paths);
+                        let event = ClipboardEvent {
+                            content,
+                            no_cloud: sensitivity.no_cloud,
+                        };
+                        if tx.send(event).is_err() {
+                            return true;
+                        }
+                        return false;
+                    }
+                }
+
                 // Try to read string content
                 let nsstring_class: Retained<AnyObject> = msg_send![class!(NSString), class];
                 let classes: Retained<AnyObject> =
@@ -205,6 +221,50 @@ mod inner {
         }
 
         tracing::info!("macOS clipboard monitor stopped");
+    }
+
+    /// Read file URLs from NSPasteboard and return as PathBuf vector.
+    unsafe fn read_file_urls(pasteboard: &AnyObject) -> Option<Vec<std::path::PathBuf>> {
+        // Use readObjectsForClasses to read NSURL objects
+        let nsurl_class: Retained<AnyObject> = msg_send![class!(NSURL), class];
+        let classes: Retained<AnyObject> =
+            msg_send![class!(NSArray), arrayWithObject: &*nsurl_class];
+        let options: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionary];
+
+        let urls: Option<Retained<AnyObject>> = msg_send![
+            pasteboard,
+            readObjectsForClasses: &*classes,
+            options: &*options
+        ];
+
+        let urls = urls?;
+        let count: usize = msg_send![&*urls, count];
+        if count == 0 {
+            return None;
+        }
+
+        let mut paths = Vec::with_capacity(count);
+        for i in 0..count {
+            let url: Retained<AnyObject> = msg_send![&*urls, objectAtIndex: i];
+
+            // Check if it's a file URL
+            let is_file_url: bool = msg_send![&*url, isFileURL];
+            if !is_file_url {
+                continue;
+            }
+
+            // Get the file path from URL
+            let path_str: Option<Retained<AnyObject>> = msg_send![&*url, path];
+            if let Some(path_nsstring) = path_str {
+                let cstr: *const std::ffi::c_char = msg_send![&*path_nsstring, UTF8String];
+                if !cstr.is_null() {
+                    let path = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+                    paths.push(std::path::PathBuf::from(path));
+                }
+            }
+        }
+
+        if paths.is_empty() { None } else { Some(paths) }
     }
 
     /// Read image data from NSPasteboard and return it as PNG bytes.

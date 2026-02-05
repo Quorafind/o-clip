@@ -381,14 +381,66 @@ fn set_clipboard_files(paths: &[std::path::PathBuf]) -> bool {
 
 #[cfg(target_os = "macos")]
 fn set_clipboard_files(paths: &[std::path::PathBuf]) -> bool {
-    // On macOS, set file URLs on the pasteboard
-    // For simplicity, fall back to setting paths as text
-    let text: String = paths
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    set_clipboard_text(&text)
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    if paths.is_empty() {
+        return false;
+    }
+
+    unsafe {
+        // Get the general pasteboard
+        let pasteboard: Retained<AnyObject> = msg_send![class!(NSPasteboard), generalPasteboard];
+
+        // Clear the pasteboard and declare types
+        let _: i64 = msg_send![&*pasteboard, clearContents];
+
+        // Create an NSMutableArray to hold file URLs
+        let file_urls: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
+
+        for path in paths {
+            // Convert path to absolute path string
+            let abs_path = if path.is_absolute() {
+                path.to_string_lossy().to_string()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(path))
+                    .unwrap_or_else(|_| path.to_path_buf())
+                    .to_string_lossy()
+                    .to_string()
+            };
+
+            // Create NSURL from file path
+            let path_nsstring: Retained<NSString> = NSString::from_str(&abs_path);
+            let file_url: Option<Retained<AnyObject>> =
+                msg_send![class!(NSURL), fileURLWithPath: &*path_nsstring];
+
+            if let Some(url) = file_url {
+                let _: () = msg_send![&*file_urls, addObject: &*url];
+            }
+        }
+
+        // Check if we have any URLs
+        let count: usize = msg_send![&*file_urls, count];
+        if count == 0 {
+            return false;
+        }
+
+        // Write file URLs to pasteboard
+        // writeObjects: expects an array of objects conforming to NSPasteboardWriting
+        // NSURL conforms to this protocol
+        let success: bool = msg_send![&*pasteboard, writeObjects: &*file_urls];
+
+        if success {
+            tracing::debug!("set {} file URL(s) on macOS pasteboard", count);
+        } else {
+            tracing::warn!("failed to write file URLs to macOS pasteboard");
+        }
+
+        success
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
