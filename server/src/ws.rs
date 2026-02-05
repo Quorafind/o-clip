@@ -273,6 +273,7 @@ async fn handle_client_message(
         }
 
         ClientMessage::Ping => {
+            tracing::debug!("ping from {client_id}");
             let _ = send_msg(sink, &ServerMessage::Pong).await;
         }
     }

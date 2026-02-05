@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde::Deserialize;
 
 use crate::clipboard::FileRef;
+use crate::clipboard::content::{ImageFormat, ImageInfo, ImageRef};
 
 #[derive(Deserialize)]
 struct UploadResponse {
@@ -188,6 +189,127 @@ impl FileTransferClient {
     /// Get the download directory path.
     pub fn download_dir(&self) -> &Path {
         &self.download_dir
+    }
+
+    /// Upload image data to the server. Returns ImageRef on success.
+    pub async fn upload_image(&self, info: &ImageInfo) -> Result<ImageRef, String> {
+        use base64::Engine;
+
+        let raw_b64 = info.raw_data.as_ref().ok_or("no raw_data in ImageInfo")?;
+
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(raw_b64)
+            .map_err(|e| format!("base64 decode error: {e}"))?;
+
+        if data.len() as u64 > self.max_file_size {
+            return Err(format!(
+                "image too large: {} > {}",
+                data.len(),
+                self.max_file_size
+            ));
+        }
+
+        // Determine filename extension based on format
+        let ext = match info.format {
+            ImageFormat::Png => "png",
+            ImageFormat::Dib | ImageFormat::DibV5 | ImageFormat::Bitmap => "bmp",
+        };
+        let filename = format!("image.{ext}");
+
+        let mime_type = match info.format {
+            ImageFormat::Png => "image/png",
+            _ => "image/bmp",
+        };
+
+        let part = reqwest::multipart::Part::bytes(data.clone())
+            .file_name(filename)
+            .mime_str(mime_type)
+            .map_err(|e| format!("mime error: {e}"))?;
+
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let url = format!("{}/files/upload", self.base_url);
+        let mut req = self.http_client.post(&url).multipart(form);
+
+        if let Some(ref pwd) = self.password {
+            if !pwd.is_empty() {
+                req = req.bearer_auth(pwd);
+            }
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("image upload failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!(
+                "image upload failed with status: {}",
+                resp.status()
+            ));
+        }
+
+        let body: UploadResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse upload response: {e}"))?;
+
+        let file_ref = body
+            .files
+            .into_iter()
+            .next()
+            .ok_or("no file in upload response")?;
+
+        Ok(ImageRef {
+            image_id: file_ref.file_id,
+            width: info.width,
+            height: info.height,
+            bits_per_pixel: info.bits_per_pixel,
+            format: info.format,
+            size: file_ref.size,
+        })
+    }
+
+    /// Download image by ImageRef and return reconstructed ImageInfo with raw data.
+    pub async fn download_image(&self, img_ref: &ImageRef) -> Result<ImageInfo, String> {
+        use base64::Engine;
+
+        let url = format!("{}/files/{}", self.base_url, img_ref.image_id);
+        let mut req = self.http_client.get(&url);
+
+        if let Some(ref pwd) = self.password {
+            if !pwd.is_empty() {
+                req = req.bearer_auth(pwd);
+            }
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("image download failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!(
+                "image download failed with status: {}",
+                resp.status()
+            ));
+        }
+
+        let data = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("failed to read image response body: {e}"))?;
+
+        let raw_data = base64::engine::general_purpose::STANDARD.encode(&data);
+
+        Ok(ImageInfo {
+            width: img_ref.width,
+            height: img_ref.height,
+            bits_per_pixel: img_ref.bits_per_pixel,
+            data_size: data.len(),
+            format: img_ref.format,
+            raw_data: Some(raw_data),
+        })
     }
 }
 

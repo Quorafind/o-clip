@@ -17,6 +17,23 @@ pub struct FileRef {
     pub mime_type: String,
 }
 
+/// Metadata for an image stored on the sync server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageRef {
+    /// Server-assigned ID (SHA-256 hash of image data).
+    pub image_id: String,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Bits per pixel.
+    pub bits_per_pixel: u16,
+    /// The original clipboard format for correct restoration.
+    pub format: ImageFormat,
+    /// File size in bytes.
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClipboardContent {
     /// One or more file paths copied via Explorer (CF_HDROP).
@@ -27,6 +44,9 @@ pub enum ClipboardContent {
 
     /// An image copied to the clipboard (CF_DIB / CF_BITMAP / PNG).
     Image(ImageInfo),
+
+    /// Image synced from a remote device with server-stored content.
+    SyncedImage(ImageRef),
 
     /// A URL/link detected from text content.
     Url(String),
@@ -90,6 +110,11 @@ impl ClipboardContent {
                     hasher.update(info.data_size.to_le_bytes());
                 }
             }
+            Self::SyncedImage(img_ref) => {
+                // Use the server-assigned image_id (content hash) directly
+                hasher.update(b"image:");
+                hasher.update(img_ref.image_id.as_bytes());
+            }
             Self::Empty => {
                 hasher.update(b"empty");
             }
@@ -136,6 +161,9 @@ impl ClipboardContent {
             Self::Image(info) => {
                 format!("{}x{} {:?}", info.width, info.height, info.format)
             }
+            Self::SyncedImage(img_ref) => {
+                format!("{}x{} {:?}", img_ref.width, img_ref.height, img_ref.format)
+            }
             Self::Empty => "Empty".to_string(),
         }
     }
@@ -148,6 +176,7 @@ impl ClipboardContent {
             Self::Files(_) => "files",
             Self::SyncedFiles(_) => "files",
             Self::Image(_) => "image",
+            Self::SyncedImage(_) => "image",
             Self::Empty => "empty",
         }
     }
@@ -160,6 +189,7 @@ impl ClipboardContent {
             Self::Files(paths) => paths.iter().map(|p| p.to_string_lossy().len()).sum(),
             Self::SyncedFiles(refs) => refs.iter().map(|r| r.size as usize).sum(),
             Self::Image(info) => info.data_size,
+            Self::SyncedImage(img_ref) => img_ref.size as usize,
             Self::Empty => 0,
         }
     }
@@ -253,6 +283,17 @@ impl fmt::Display for ClipboardContent {
                     info.bits_per_pixel,
                     info.data_size as f64 / 1024.0,
                     info.format,
+                )
+            }
+            Self::SyncedImage(img_ref) => {
+                write!(
+                    f,
+                    "SyncedImage({}x{}, {}bpp, {:.1}KB, {:?})",
+                    img_ref.width,
+                    img_ref.height,
+                    img_ref.bits_per_pixel,
+                    img_ref.size as f64 / 1024.0,
+                    img_ref.format,
                 )
             }
             Self::Url(url) => write!(f, "Url({url})"),

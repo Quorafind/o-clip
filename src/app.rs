@@ -111,6 +111,9 @@ impl App {
         let dyn_img = match entry.to_clipboard_content() {
             Some(ClipboardContent::Image(info)) => info.to_dynamic_image(),
             Some(ClipboardContent::Files(paths)) => load_image_from_file_paths(&paths),
+            // SyncedImage: image data is on the server, no local preview available
+            // without downloading. Skip for now to avoid blocking the UI.
+            Some(ClipboardContent::SyncedImage(_)) => None,
             _ => None,
         };
 
@@ -248,6 +251,14 @@ impl App {
                         self.status_message = Some("Failed to set image on clipboard".to_string());
                     }
                 }
+            }
+            crate::clipboard::ClipboardContent::SyncedImage(img_ref) => {
+                // SyncedImage data is on the server; cannot restore directly from history.
+                // The image was already written to clipboard when it was synced.
+                self.status_message = Some(format!(
+                    "Synced image {}x{} — data stored on server",
+                    img_ref.width, img_ref.height
+                ));
             }
             crate::clipboard::ClipboardContent::Empty => {
                 self.status_message = Some("Nothing to copy".to_string());
@@ -655,6 +666,13 @@ pub fn is_image_file(path: &std::path::Path) -> bool {
 fn load_image_from_file_paths(paths: &[std::path::PathBuf]) -> Option<image::DynamicImage> {
     for path in paths {
         if is_image_file(path) && path.exists() {
+            // Skip files larger than 10MB to avoid blocking UI
+            if let Ok(meta) = std::fs::metadata(path) {
+                if meta.len() > 10 * 1024 * 1024 {
+                    tracing::debug!("skipping large image file: {}", path.display());
+                    continue;
+                }
+            }
             if let Ok(img) = image::open(path) {
                 return Some(img);
             }

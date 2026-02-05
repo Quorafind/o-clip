@@ -41,12 +41,23 @@ enum FileRequest {
     },
     /// Download SyncedFiles from server.
     Download { refs: Vec<clipboard::FileRef> },
+    /// Upload image to server, then send the resulting SyncedImage entry via WS.
+    UploadImage {
+        entry: ClipboardEntry,
+        info: clipboard::content::ImageInfo,
+    },
+    /// Download SyncedImage from server.
+    DownloadImage {
+        img_ref: clipboard::content::ImageRef,
+    },
 }
 
 /// Response from tokio runtime back to main thread.
 enum FileResponse {
     /// Files downloaded successfully; set these local paths on the clipboard.
     Downloaded(Vec<std::path::PathBuf>),
+    /// Image downloaded successfully; set this ImageInfo on the clipboard.
+    ImageDownloaded(clipboard::content::ImageInfo),
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,6 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Sync size limit: entries larger than this are stored locally only
     let max_sync_size = config.server.max_sync_size;
+    // Image inline threshold: images smaller than this sync as base64, larger use file transfer
+    let image_inline_threshold = config.server.image_inline_threshold;
 
     // File transfer channels (main thread <-> tokio runtime)
     let (file_req_tx, mut file_req_rx) = tokio::sync::mpsc::unbounded_channel::<FileRequest>();
@@ -156,6 +169,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             tracing::warn!("file download failed: {e}");
                         }
                     },
+                    FileRequest::UploadImage { mut entry, info } => {
+                        match fc.upload_image(&info).await {
+                            Ok(img_ref) => {
+                                // Replace content with SyncedImage
+                                let synced = clipboard::ClipboardContent::SyncedImage(img_ref);
+                                let content_json =
+                                    serde_json::to_string(&synced).unwrap_or_default();
+                                entry.content = content_json;
+                                entry.hash = synced.content_hash();
+                                entry.byte_size = synced.byte_size() as i64;
+                                entry.preview = synced.preview(120);
+                                let _ = ws_tx.send(entry);
+                                tracing::info!("image upload complete, sent SyncedImage entry");
+                            }
+                            Err(e) => {
+                                tracing::warn!("image upload failed: {e}");
+                            }
+                        }
+                    }
+                    FileRequest::DownloadImage { img_ref } => {
+                        match fc.download_image(&img_ref).await {
+                            Ok(info) => {
+                                let _ = resp_tx.send(FileResponse::ImageDownloaded(info));
+                            }
+                            Err(e) => {
+                                tracing::warn!("image download failed: {e}");
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -279,6 +321,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else if !event.no_cloud {
                 // Check if this is a Files entry that should be uploaded
                 let is_files = matches!(&event.content, clipboard::ClipboardContent::Files(_));
+                // Check if this is an Image entry that should be uploaded
+                let is_image = matches!(&event.content, clipboard::ClipboardContent::Image(_));
+
                 if is_files {
                     // Extract paths and send to file upload handler
                     if let clipboard::ClipboardContent::Files(paths) = &event.content {
@@ -287,6 +332,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             paths: paths.clone(),
                         });
                         tracing::info!("queued {} file(s) for upload", paths.len());
+                    }
+                } else if is_image {
+                    // Extract ImageInfo and decide: inline (small) vs file transfer (large)
+                    if let clipboard::ClipboardContent::Image(info) = &event.content {
+                        if info.raw_data.is_none() {
+                            tracing::debug!("skipping image sync: no raw_data");
+                        } else if info.data_size <= image_inline_threshold {
+                            // Small image: sync inline as base64 (faster for screenshots)
+                            if (entry.byte_size as usize) <= max_sync_size {
+                                let _ = ws_outbound_tx.send(entry.clone());
+                                tracing::info!(
+                                    "syncing small image inline: {}x{} ({} bytes)",
+                                    info.width,
+                                    info.height,
+                                    info.data_size
+                                );
+                            }
+                        } else {
+                            // Large image: use file transfer
+                            let _ = file_req_tx.send(FileRequest::UploadImage {
+                                entry: entry.clone(),
+                                info: info.clone(),
+                            });
+                            tracing::info!(
+                                "queued large image for upload: {}x{} ({} bytes)",
+                                info.width,
+                                info.height,
+                                info.data_size
+                            );
+                        }
                     }
                 } else if (entry.byte_size as usize) <= max_sync_size {
                     let _ = ws_outbound_tx.send(entry.clone());
@@ -320,6 +395,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let clipboard::ClipboardContent::SyncedFiles(refs) = &content {
                             let _ = file_req_tx.send(FileRequest::Download { refs: refs.clone() });
                             tracing::info!("queued {} file(s) for download", refs.len());
+                        }
+
+                        // If this is a SyncedImage entry, trigger async download
+                        if let clipboard::ClipboardContent::SyncedImage(img_ref) = &content {
+                            let _ = file_req_tx.send(FileRequest::DownloadImage {
+                                img_ref: img_ref.clone(),
+                            });
+                            tracing::info!(
+                                "queued image for download: {}x{}",
+                                img_ref.width,
+                                img_ref.height
+                            );
                         }
                     }
 
@@ -381,6 +468,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "Downloaded {} file(s) -> {}",
                             local_paths.len(),
                             dir_display,
+                        ));
+                    }
+                }
+                FileResponse::ImageDownloaded(info) => {
+                    tracing::info!(
+                        "image downloaded: {}x{} {:?}",
+                        info.width,
+                        info.height,
+                        info.format
+                    );
+
+                    // Remember hash to prevent echo
+                    let content = clipboard::ClipboardContent::Image(info.clone());
+                    let hash = content.content_hash();
+                    recent_remote_hashes.insert(hash, Instant::now());
+
+                    // Set clipboard
+                    clipboard::mark_self_write();
+                    if app::set_clipboard_image_public(&info) {
+                        app.status_message = Some(format!(
+                            "Image synced: {}x{} {:?}",
+                            info.width, info.height, info.format
                         ));
                     }
                 }
@@ -458,8 +567,15 @@ fn auto_copy_to_clipboard(entry: &ClipboardEntry) {
             // Do NOT call mark_self_write() since we're not writing to the clipboard.
         }
         ClipboardContent::Image(info) => {
+            // Local images are uploaded and converted to SyncedImage before sync.
+            // This branch handles legacy inline images if any remain in the DB.
             clipboard::mark_self_write();
             app::set_clipboard_image_public(info);
+        }
+        ClipboardContent::SyncedImage(_) => {
+            // SyncedImage is downloaded asynchronously via the file transfer channel.
+            // Don't set clipboard here — it will be set when the download completes.
+            // Do NOT call mark_self_write() since we're not writing to the clipboard.
         }
         ClipboardContent::Empty => {}
     }

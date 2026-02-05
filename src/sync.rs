@@ -277,7 +277,9 @@ pub async fn run_sync(
                     tracing::info!("sent sync_request for recent history");
                 }
 
-                // Normal send/receive loop
+                // Normal send/receive loop with periodic keepalive
+                let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+                ping_interval.reset(); // skip the immediate first tick
                 loop {
                     tokio::select! {
                         // Send outbound entries
@@ -308,6 +310,16 @@ pub async fn run_sync(
                                 Some(Ok(_)) => {} // binary, ping, pong
                                 Some(Err(e)) => {
                                     tracing::warn!("ws receive error: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                        // Periodic keepalive to prevent idle connection timeout
+                        _ = ping_interval.tick() => {
+                            let msg = ClientMessage::Ping;
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                if let Err(e) = sink.send(Message::Text(json.into())).await {
+                                    tracing::debug!("keepalive send failed: {e}");
                                     break;
                                 }
                             }

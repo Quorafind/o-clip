@@ -46,6 +46,11 @@ pub struct ServerConfig {
     /// Directory for storing downloaded files. Empty = platform default.
     #[serde(default)]
     pub download_dir: String,
+    /// Image size threshold for file-based transfer (in bytes). Default: 200 KB.
+    /// Images smaller than this are synced inline (base64), larger ones use file transfer.
+    /// Small screenshots sync faster inline; large images benefit from file transfer.
+    #[serde(default = "default_image_inline_threshold")]
+    pub image_inline_threshold: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +76,10 @@ fn default_max_file_sync_size() -> u64 {
     50 * 1024 * 1024 // 50 MB
 }
 
+fn default_image_inline_threshold() -> usize {
+    200 * 1024 // 200 KB
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -81,6 +90,7 @@ impl Default for ServerConfig {
             password: None,
             max_file_sync_size: default_max_file_sync_size(),
             download_dir: String::new(),
+            image_inline_threshold: default_image_inline_threshold(),
         }
     }
 }

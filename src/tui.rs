@@ -308,6 +308,17 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &mut App) {
                         info.format,
                     )
                 }
+                crate::clipboard::ClipboardContent::SyncedImage(img_ref) => {
+                    format!(
+                        "Synced Image:\n  Width: {} px\n  Height: {} px\n  Bits/pixel: {}\n  Size: {:.1} KB\n  Format: {:?}\n  ID: {}...",
+                        img_ref.width,
+                        img_ref.height,
+                        img_ref.bits_per_pixel,
+                        img_ref.size as f64 / 1024.0,
+                        img_ref.format,
+                        &img_ref.image_id[..16],
+                    )
+                }
                 _ => entry.content.clone(),
             })
             .unwrap_or_else(|| entry.content.clone()),
