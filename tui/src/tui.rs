@@ -1,0 +1,382 @@
+use chrono::Local;
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui_image::StatefulImage;
+
+use crate::app::{App, Mode};
+use o_clip_core::clipboard::ClipboardContent;
+use o_clip_core::entry_manager;
+use o_clip_core::store::{ClipboardEntry, EntrySource};
+use o_clip_core::sync::ConnectionStatus;
+
+// -- Palette ----------------------------------------------------------------
+// Using terminal theme colors so the app adapts to any color scheme.
+const BORDER: Color = Color::DarkGray;
+const BORDER_ACTIVE: Color = Color::Yellow;
+const TITLE_FG: Color = Color::Reset;
+const DIM: Color = Color::DarkGray;
+const DIM_BRIGHT: Color = Color::Gray;
+const BAR_BG: Color = Color::Indexed(236); // very dark gray (near-black)
+const HIGHLIGHT_BG: Color = Color::Indexed(238); // subtle dark highlight
+const PIN_FG: Color = Color::Yellow;
+
+/// Render the entire UI.
+pub fn render(frame: &mut Frame, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title bar
+            Constraint::Min(5),    // main content
+            Constraint::Length(1), // status bar
+        ])
+        .split(frame.area());
+
+    render_title_bar(frame, chunks[0], app);
+    render_main(frame, chunks[1], app);
+    render_status_bar(frame, chunks[2], app);
+}
+
+fn render_title_bar(frame: &mut Frame, area: Rect, app: &App) {
+    let ws_indicator = match app.manager.ws_status {
+        ConnectionStatus::Connected => {
+            Span::styled(" [WS: Connected] ", Style::default().fg(Color::Green))
+        }
+        ConnectionStatus::Connecting => {
+            Span::styled(" [WS: Connecting...] ", Style::default().fg(Color::Yellow))
+        }
+        ConnectionStatus::Disconnected => {
+            Span::styled(" [WS: Disconnected] ", Style::default().fg(DIM))
+        }
+    };
+
+    let title = Line::from(vec![
+        Span::styled(
+            " o-clip ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("| {} entries ", app.manager.total_count),
+            Style::default().fg(TITLE_FG),
+        ),
+        ws_indicator,
+    ]);
+
+    let bar = Paragraph::new(title).style(Style::default().bg(BAR_BG).fg(TITLE_FG));
+    frame.render_widget(bar, area);
+}
+
+fn render_main(frame: &mut Frame, area: Rect, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+
+    render_list(frame, chunks[0], app);
+    render_preview(frame, chunks[1], app);
+}
+
+fn render_list(frame: &mut Frame, area: Rect, app: &App) {
+    let title = if app.mode == Mode::Search {
+        format!(" Search: {} ", app.manager.search_query)
+    } else {
+        " Clipboard History ".to_string()
+    };
+
+    // Partition entries into pinned and unpinned groups.
+    let pinned_count = app.manager.entries.iter().filter(|e| e.pinned).count();
+
+    let make_entry_item = |entry: &ClipboardEntry| -> ListItem {
+        let type_tag = match entry.content_type.as_str() {
+            "text" => Span::styled("[T] ", Style::default().fg(Color::Blue)),
+            "url" => Span::styled("[U] ", Style::default().fg(Color::Magenta)),
+            "files" => Span::styled("[F] ", Style::default().fg(Color::Green)),
+            "image" => Span::styled("[I] ", Style::default().fg(Color::Yellow)),
+            _ => Span::styled("[?] ", Style::default().fg(DIM)),
+        };
+
+        let pin_span = if entry.pinned {
+            Span::styled("* ", Style::default().fg(PIN_FG))
+        } else {
+            Span::styled("  ", Style::default())
+        };
+
+        let time_str = entry
+            .created_at
+            .with_timezone(&Local)
+            .format("%H:%M:%S")
+            .to_string();
+        let time_span = Span::styled(format!("{time_str} "), Style::default().fg(DIM));
+
+        let source_tag = match entry.source {
+            EntrySource::Remote => Span::styled("R ", Style::default().fg(Color::Cyan)),
+            EntrySource::Local => Span::styled("L ", Style::default().fg(DIM)),
+        };
+
+        let preview_text = truncate_line(&entry.preview, area.width.saturating_sub(18) as usize);
+        let preview_span = Span::styled(preview_text, Style::default().fg(Color::Reset));
+
+        let line = Line::from(vec![
+            pin_span,
+            time_span,
+            source_tag,
+            type_tag,
+            preview_span,
+        ]);
+        ListItem::new(line)
+    };
+
+    // Build visual list with group headers when pinned entries exist.
+    // Track how many header rows are inserted before the selected entry
+    // so we can map app.selected → visual index.
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut header_offset = 0; // headers before or at current entry position
+
+    if pinned_count > 0 {
+        // -- Pinned group header --
+        items.push(ListItem::new(Line::from(Span::styled(
+            "── Pinned ──",
+            Style::default().fg(PIN_FG).add_modifier(Modifier::BOLD),
+        ))));
+        for entry in app.manager.entries.iter().take(pinned_count) {
+            items.push(make_entry_item(entry));
+        }
+
+        // -- History group header --
+        if pinned_count < app.manager.entries.len() {
+            items.push(ListItem::new(Line::from(Span::styled(
+                "── History ──",
+                Style::default().fg(DIM_BRIGHT).add_modifier(Modifier::BOLD),
+            ))));
+        }
+
+        // Compute header offset for selection mapping:
+        // 1 header always before pinned items; +1 header if selected is in history section
+        header_offset = if app.manager.selected < pinned_count { 1 } else { 2 };
+
+        for entry in app.manager.entries.iter().skip(pinned_count) {
+            items.push(make_entry_item(entry));
+        }
+    } else {
+        // No pinned entries – flat list, no headers.
+        for entry in app.manager.entries.iter() {
+            items.push(make_entry_item(entry));
+        }
+    };
+
+    let border_color = if app.mode == Mode::Search {
+        BORDER_ACTIVE
+    } else {
+        BORDER
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(title, Style::default().fg(TITLE_FG)))
+                .border_style(Style::default().fg(border_color)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(HIGHLIGHT_BG)
+                .fg(Color::Reset)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default();
+    state.select(Some(app.manager.selected + header_offset));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_preview(frame: &mut Frame, area: Rect, app: &mut App) {
+    let preview_block = |title: &str| {
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                title.to_string(),
+                Style::default().fg(TITLE_FG),
+            ))
+            .border_style(Style::default().fg(BORDER))
+    };
+
+    let Some(entry) = app.selected_entry().cloned() else {
+        let paragraph = Paragraph::new(Text::styled("No entry selected", Style::default().fg(DIM)))
+            .block(preview_block(" Preview "))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+        return;
+    };
+
+    let title = format!(
+        " Preview [{}] - {} bytes ",
+        entry.content_type, entry.byte_size
+    );
+
+    // For entries with a loaded image preview (image type or file pointing to an image).
+    let is_image_file_entry = entry.content_type == "files"
+        && entry
+            .to_clipboard_content()
+            .is_some_and(|c| matches!(&c, ClipboardContent::Files(paths) if paths.iter().any(|p| entry_manager::is_image_file(p))));
+
+    if (entry.content_type == "image" || is_image_file_entry) && app.image_preview.is_some() {
+        let metadata = entry
+            .to_clipboard_content()
+            .map(|c| match c {
+                ClipboardContent::Image(info) => {
+                    format!(
+                        " {}x{} {:?} | {:.1} KB",
+                        info.width,
+                        info.height,
+                        info.format,
+                        info.data_size as f64 / 1024.0,
+                    )
+                }
+                ClipboardContent::Files(paths) => paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                _ => String::new(),
+            })
+            .unwrap_or_default();
+
+        // Split area: image takes most space, metadata gets 1 line at bottom.
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(1)])
+            .split(area);
+
+        // Render image inside a bordered block.
+        let block = preview_block(&title);
+        let inner = block.inner(chunks[0]);
+        frame.render_widget(block, chunks[0]);
+
+        let image_widget = StatefulImage::default();
+        if let Some(ref mut proto) = app.image_preview {
+            frame.render_stateful_widget(image_widget, inner, proto);
+        }
+
+        // Metadata line below the image.
+        let meta_line = Paragraph::new(Span::styled(metadata, Style::default().fg(DIM)));
+        frame.render_widget(meta_line, chunks[1]);
+        return;
+    }
+
+    // Non-image entries (or images without decoded data): text preview.
+    let display = match entry.content_type.as_str() {
+        "text" | "url" => entry
+            .to_clipboard_content()
+            .map(|c| match c {
+                ClipboardContent::Text(t) => t,
+                ClipboardContent::Url(u) => u,
+                _ => entry.content.clone(),
+            })
+            .unwrap_or_else(|| entry.content.clone()),
+        "files" => entry
+            .to_clipboard_content()
+            .map(|c| match c {
+                ClipboardContent::Files(paths) => {
+                    let mut lines: Vec<String> = Vec::new();
+                    for p in &paths {
+                        let path_str = p.to_string_lossy().to_string();
+                        if p.exists() {
+                            lines.push(path_str);
+                        } else {
+                            lines.push(format!("{path_str}  [FILE DELETED]"));
+                        }
+                    }
+                    let any_deleted = paths.iter().any(|p| !p.exists());
+                    let mut s = lines.join("\n");
+                    if any_deleted {
+                        s.push_str("\n\n(Local files deleted, cannot re-fetch)");
+                    }
+                    s
+                }
+                ClipboardContent::SyncedFiles(refs) => {
+                    let header = format!("{} synced file(s):\n", refs.len());
+                    let list: Vec<String> = refs
+                        .iter()
+                        .map(|r| format!("  {} ({:.1} KB)", r.filename, r.size as f64 / 1024.0))
+                        .collect();
+                    header + &list.join("\n") + "\n\nPress 'f' to re-download"
+                }
+                _ => entry.content.clone(),
+            })
+            .unwrap_or_else(|| entry.content.clone()),
+        "image" => entry
+            .to_clipboard_content()
+            .map(|c| match c {
+                ClipboardContent::Image(info) => {
+                    format!(
+                        "Image:\n  Width: {} px\n  Height: {} px\n  Bits/pixel: {}\n  Size: {:.1} KB\n  Format: {:?}",
+                        info.width,
+                        info.height,
+                        info.bits_per_pixel,
+                        info.data_size as f64 / 1024.0,
+                        info.format,
+                    )
+                }
+                ClipboardContent::SyncedImage(img_ref) => {
+                    format!(
+                        "Synced Image:\n  Width: {} px\n  Height: {} px\n  Bits/pixel: {}\n  Size: {:.1} KB\n  Format: {:?}\n  ID: {}...",
+                        img_ref.width,
+                        img_ref.height,
+                        img_ref.bits_per_pixel,
+                        img_ref.size as f64 / 1024.0,
+                        img_ref.format,
+                        &img_ref.image_id[..16],
+                    )
+                }
+                _ => entry.content.clone(),
+            })
+            .unwrap_or_else(|| entry.content.clone()),
+        _ => entry.content.clone(),
+    };
+
+    let paragraph = Paragraph::new(Text::styled(display, Style::default().fg(Color::Reset)))
+        .block(preview_block(&title))
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, area);
+}
+
+fn render_status_bar(frame: &mut Frame, area: Rect, app: &App) {
+    let msg = if let Some(ref status) = app.manager.status_message {
+        Span::styled(format!(" {status} "), Style::default().fg(Color::Cyan))
+    } else {
+        Span::raw("")
+    };
+
+    let keybinds = match app.mode {
+        Mode::Normal => {
+            " q:Quit  j/k:Navigate  Enter:Copy  d:Delete  p:Pin  f:Re-fetch  /:Search  r:Reconnect "
+        }
+        Mode::Search => " Esc:Cancel  Enter:Confirm  Type to search... ",
+    };
+
+    let line = Line::from(vec![
+        msg,
+        Span::styled(keybinds, Style::default().fg(DIM_BRIGHT)),
+    ]);
+
+    let bar = Paragraph::new(line).style(Style::default().bg(BAR_BG));
+    frame.render_widget(bar, area);
+}
+
+fn truncate_line(s: &str, max: usize) -> String {
+    let line = s.lines().next().unwrap_or(s);
+    if line.len() > max {
+        format!(
+            "{}...",
+            &line[..line.floor_char_boundary(max.saturating_sub(3))]
+        )
+    } else {
+        line.to_string()
+    }
+}

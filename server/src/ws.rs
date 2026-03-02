@@ -25,11 +25,18 @@ pub struct AppState {
 
 /// An event broadcast to all connected clients.
 #[derive(Debug, Clone)]
-pub struct BroadcastEvent {
-    /// The entry to broadcast.
-    pub entry: ClipboardEntry,
-    /// The client address that originated this entry (to avoid echo).
-    pub origin: String,
+pub enum BroadcastEvent {
+    /// A new clipboard entry.
+    NewEntry {
+        entry: ClipboardEntry,
+        /// The client address that originated this entry (to avoid echo).
+        origin: String,
+    },
+    /// All data has been cleared.
+    ClearAll {
+        /// The client address that initiated the clear.
+        origin: String,
+    },
 }
 
 /// Handle a single WebSocket connection.
@@ -109,14 +116,29 @@ pub async fn handle_socket(socket: WebSocket, addr: SocketAddr, state: Arc<AppSt
 
             // Outbound: broadcast events from other clients
             Ok(event) = broadcast_rx.recv() => {
-                // Don't echo back to the origin client
-                if event.origin == client_id {
-                    continue;
-                }
-                let msg = ServerMessage::ClipboardEntry(event.entry);
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    if sink.send(Message::Text(json.into())).await.is_err() {
-                        break;
+                match event {
+                    BroadcastEvent::NewEntry { entry, origin } => {
+                        // Don't echo back to the origin client
+                        if origin == client_id {
+                            continue;
+                        }
+                        let msg = ServerMessage::ClipboardEntry(entry);
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if sink.send(Message::Text(json.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    BroadcastEvent::ClearAll { origin } => {
+                        if origin == client_id {
+                            continue;
+                        }
+                        let msg = ServerMessage::ClearAll;
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if sink.send(Message::Text(json.into())).await.is_err() {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -195,16 +217,18 @@ async fn handle_client_message(
             // Store in server DB.
             // ON CONFLICT bumps created_at to the top without creating a duplicate row,
             // so repeated copies of the same content just resurface the existing entry.
-            match state.store.insert(&entry, client_id, &client_hash) {
-                Ok(true) => {
-                    tracing::info!(
-                        "stored entry from {client_id}: [{}] {}",
-                        entry.content_type,
-                        truncate(&entry.preview, 60)
-                    );
-                }
-                Ok(false) => {
-                    tracing::debug!("entry already existed (hash conflict) from {client_id}");
+            let is_new = match state.store.insert(&entry, client_id, &client_hash) {
+                Ok(is_new) => {
+                    if is_new {
+                        tracing::info!(
+                            "stored entry from {client_id}: [{}] {}",
+                            entry.content_type,
+                            truncate(&entry.preview, 60)
+                        );
+                    } else {
+                        tracing::debug!("entry already existed (hash conflict) from {client_id}");
+                    }
+                    is_new
                 }
                 Err(e) => {
                     tracing::warn!("failed to store entry from {client_id}: {e}");
@@ -214,16 +238,21 @@ async fn handle_client_message(
                     let _ = send_msg(sink, &err).await;
                     return;
                 }
-            }
+            };
 
             // Enforce server-side storage limit, cleaning up associated files
             cleanup_pruned_files(&state);
 
-            // Broadcast to other connected clients
-            let _ = state.broadcast_tx.send(BroadcastEvent {
-                entry,
-                origin: client_id.to_string(),
-            });
+            // Only broadcast genuinely new entries. Duplicate entries (same hash)
+            // just bump the timestamp on the server but are NOT re-broadcast.
+            // This prevents infinite echo loops when multiple clients (e.g. GUI + TUI)
+            // run on the same machine and both capture the same clipboard change.
+            if is_new {
+                let _ = state.broadcast_tx.send(BroadcastEvent::NewEntry {
+                    entry,
+                    origin: client_id.to_string(),
+                });
+            }
         }
 
         ClientMessage::SyncRequest { limit } => {
@@ -266,6 +295,22 @@ async fn handle_client_message(
                     let _ = send_msg(sink, &err).await;
                 }
             }
+        }
+
+        ClientMessage::ClearAll => {
+            tracing::info!("clear_all requested by {client_id}");
+            // Clear all entries and file records from DB
+            if let Err(e) = state.store.clear_all() {
+                tracing::warn!("failed to clear entries: {e}");
+            }
+            // Delete all files from disk
+            if let Err(e) = state.file_store.clear_all() {
+                tracing::warn!("failed to clear files from disk: {e}");
+            }
+            // Broadcast to other clients
+            let _ = state.broadcast_tx.send(BroadcastEvent::ClearAll {
+                origin: client_id.to_string(),
+            });
         }
 
         ClientMessage::Auth { .. } => {
@@ -318,7 +363,7 @@ pub fn cleanup_pruned_files(state: &AppState) {
 
 /// Parse content JSON to extract FileRef file_ids and decrement their ref_count.
 /// If ref_count reaches 0, delete the file from disk.
-fn extract_and_cleanup_file_refs(content: &str, state: &AppState) {
+pub fn extract_and_cleanup_file_refs(content: &str, state: &AppState) {
     // The content is JSON-serialized ClipboardContent.
     // SyncedFiles variant serializes as: {"SyncedFiles":[{...}, ...]}
     // Try to extract file_id values from the JSON.

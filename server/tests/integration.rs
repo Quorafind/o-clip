@@ -14,6 +14,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use o_clip_server::config::ServerConfig;
+use o_clip_server::file_store::FileStore;
 use o_clip_server::protocol::{ClientMessage, ClipboardEntry, ServerMessage};
 use o_clip_server::rate_limit::{RateLimitConfig, RateLimiter};
 use o_clip_server::store::Store;
@@ -24,11 +25,14 @@ async fn start_test_server(config: ServerConfig, rate_config: RateLimitConfig) -
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");
     let store = Store::open(&db_path).unwrap();
+    let files_dir = dir.path().join("files");
+    let file_store = FileStore::new(files_dir).unwrap();
     let (broadcast_tx, _) = broadcast::channel(256);
     let rate_limiter = RateLimiter::new(rate_config);
 
     let state = Arc::new(AppState {
         store,
+        file_store,
         rate_limiter,
         broadcast_tx,
         config,

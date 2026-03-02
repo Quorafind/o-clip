@@ -101,7 +101,17 @@ impl Store {
         client_hash: &str,
     ) -> rusqlite::Result<bool> {
         let conn = self.conn.lock().unwrap();
-        let changes = conn.execute(
+
+        // Check if this hash already exists before inserting.
+        // ON CONFLICT DO UPDATE always reports 1 changed row, so we can't
+        // distinguish insert from update via changes() alone.
+        let already_exists: bool = conn.query_row(
+            "SELECT COUNT(*) FROM entries WHERE hash = ?1",
+            params![entry.hash],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        )?;
+
+        conn.execute(
             "INSERT INTO entries (client_id, content_type, content, preview, hash, byte_size, created_at, client_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at",
@@ -116,7 +126,64 @@ impl Store {
                 client_hash,
             ],
         )?;
-        Ok(changes > 0)
+        Ok(!already_exists)
+    }
+
+    /// Delete an entry by id. Returns true if a row was deleted.
+    pub fn delete_entry(&self, id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute("DELETE FROM entries WHERE id = ?1", params![id])?;
+        Ok(deleted > 0)
+    }
+
+    /// Delete entries older than the given RFC 3339 timestamp.
+    /// Returns (deleted_count, list of (id, content_type, content) for file cleanup).
+    pub fn delete_before(
+        &self,
+        before_rfc3339: &str,
+    ) -> rusqlite::Result<(usize, Vec<(i64, String, String)>)> {
+        let conn = self.conn.lock().unwrap();
+        // Collect entries to be deleted (for file cleanup).
+        let mut stmt = conn.prepare(
+            "SELECT id, content_type, content FROM entries WHERE created_at < ?1",
+        )?;
+        let to_delete: Vec<(i64, String, String)> = stmt
+            .query_map(params![before_rfc3339], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let deleted = conn.execute(
+            "DELETE FROM entries WHERE created_at < ?1",
+            params![before_rfc3339],
+        )?;
+        Ok((deleted, to_delete))
+    }
+
+    /// List entries for admin API (paginated, newest first).
+    pub fn list_entries(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> rusqlite::Result<Vec<ClipboardEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, content_type, content, preview, hash, byte_size, created_at
+             FROM entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            Ok(ClipboardEntry {
+                id: row.get(0)?,
+                content_type: row.get(1)?,
+                content: row.get(2)?,
+                preview: row.get(3)?,
+                hash: row.get(4)?,
+                byte_size: row.get(5)?,
+                synced: true,
+                created_at: parse_datetime(row.get::<_, String>(6)?),
+                client_hash: String::new(),
+            })
+        })?;
+        rows.collect()
     }
 
     /// Get recent entries for sync_request. Capped at `max_limit`.
@@ -180,6 +247,14 @@ impl Store {
             params![max_entries as i64],
         )?;
         Ok(deleted)
+    }
+
+    /// Delete all entries from the database.
+    pub fn clear_all(&self) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM entries", [])?;
+        conn.execute("DELETE FROM files", [])?;
+        Ok(())
     }
 
     /// Total entry count.

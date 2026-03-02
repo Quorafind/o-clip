@@ -82,6 +82,22 @@ impl FileStore {
         Ok(())
     }
 
+    /// Delete all stored files from disk.
+    pub fn clear_all(&self) -> std::io::Result<()> {
+        if self.base_dir.exists() {
+            for entry in std::fs::read_dir(&self.base_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(&path);
+                } else {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Compute SHA-256 hex hash of content.
     pub fn hash_content(data: &[u8]) -> String {
         let mut hasher = Sha256::new();

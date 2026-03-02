@@ -1,16 +1,29 @@
-[package]
-name = "o-clip"
+[workspace]
+members = ["core", "tui", "gui", "server"]
+default-members = ["core", "tui", "server"]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[profile.release]
+strip = true        # Remove debug info & symbols (~3-4 MB savings)
+lto = true           # Link-time optimization (merges + eliminates dead code)
+codegen-units = 1    # Better optimization (slower compile)
+opt-level = "z"      # Optimize for size instead of speed
+
+
+[workspace.dependencies]
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 url = "2"
 ratatui = "0.29"
 ratatui-image = { version = "4", default-features = false, features = ["crossterm", "image-defaults"] }
-image = "0.25"
+image = { version = "0.25", default-features = false, features = [
+    "png", "jpeg", "gif", "bmp", "webp", "ico", "tiff",
+] }
 crossterm = "0.28"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -30,21 +43,23 @@ uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+# GUI (Windows-only)
+native-windows-gui = "1.0.13"
+native-windows-derive = "1.0.5"
+
+# Platform-specific
 objc2 = "0.6"
 objc2-foundation = "0.3"
 libc = "0.2"
-
-[target.'cfg(windows)'.dependencies.windows]
-version = "0.62"
-features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Console",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
-]
+] }

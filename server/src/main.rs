@@ -1,3 +1,4 @@
+mod admin;
 mod config;
 mod file_store;
 mod files;
@@ -14,7 +15,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
@@ -118,6 +119,11 @@ async fn main() {
         .route("/health", get(health_handler))
         .route("/files/upload", post(file_upload_handler))
         .route("/files/{file_id}", get(file_download_handler))
+        .route("/admin", get(admin::admin_page_handler))
+        .route("/api/entries", get(admin::list_entries_handler))
+        .route("/api/entries", delete(admin::clear_all_handler))
+        .route("/api/entries/before", delete(admin::delete_before_handler))
+        .route("/api/entries/{id}", delete(admin::delete_entry_handler))
         .layer(DefaultBodyLimit::max(config.max_file_size + 4096))
         .layer(CorsLayer::permissive())
         .with_state(state);

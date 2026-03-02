@@ -75,6 +75,10 @@ pub enum ClientMessage {
     /// Keepalive.
     #[serde(rename = "ping")]
     Ping,
+
+    /// Client requests the server to clear all entries and files.
+    #[serde(rename = "clear_all")]
+    ClearAll,
 }
 
 /// Messages sent from server to client.
@@ -105,6 +109,10 @@ pub enum ServerMessage {
     /// Keepalive response.
     #[serde(rename = "pong")]
     Pong,
+
+    /// Broadcast: all data has been cleared by another client.
+    #[serde(rename = "clear_all")]
+    ClearAll,
 }
 
 #[cfg(test)]

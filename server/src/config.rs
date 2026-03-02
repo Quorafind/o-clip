@@ -104,7 +104,7 @@ fn default_max_file_size() -> usize {
     50 * 1024 * 1024 // 50 MB
 }
 fn default_max_total_file_storage() -> u64 {
-    1024 * 1024 * 1024 // 1 GB
+    5 * 1024 * 1024 * 1024 // 5 GB
 }
 
 impl Default for ServerConfig {
