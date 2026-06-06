@@ -21,12 +21,16 @@ use tokio::sync::Notify;
 use crate::app::{App, Mode};
 use crate::config::{Cli, Config};
 use o_clip_core::clipboard::ClipboardEvent;
-use o_clip_core::file_transfer::{FileRequest, FileResponse, FileTransferClient};
+use o_clip_core::file_transfer::{
+    FileRequest, FileResponse, FileTransferClient, download_files_key, download_image_key,
+};
 use o_clip_core::store::{ClipboardEntry, EntrySource, Store};
 use o_clip_core::sync::{SyncCommand, SyncEvent};
 
 #[cfg(target_os = "windows")]
 use o_clip_core::clipboard::ClipboardMonitor;
+
+const FILE_DOWNLOAD_DEDUP_TTL: Duration = Duration::from_secs(5);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse CLI arguments and load configuration.
@@ -108,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ws_tx = ws_outbound_tx_clone;
         let resp_tx = file_resp_tx;
         rt.spawn(async move {
+            let mut recent_downloads: HashMap<String, Instant> = HashMap::new();
             while let Some(req) = file_req_rx.recv().await {
                 match req {
                     FileRequest::Upload { mut entry, paths } => match fc.upload_files(&paths).await
@@ -128,14 +133,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             tracing::warn!("file upload failed: {e}");
                         }
                     },
-                    FileRequest::Download { refs } => match fc.download_files(&refs).await {
-                        Ok(local_paths) => {
-                            let _ = resp_tx.send(FileResponse::Downloaded(local_paths));
+                    FileRequest::Download { refs } => {
+                        let key = download_files_key(&refs);
+                        recent_downloads.retain(|_, ts| ts.elapsed() < FILE_DOWNLOAD_DEDUP_TTL);
+                        if recent_downloads.contains_key(&key) {
+                            tracing::debug!("skipping duplicate file download: {key}");
+                            continue;
                         }
-                        Err(e) => {
-                            tracing::warn!("file download failed: {e}");
+                        recent_downloads.insert(key.clone(), Instant::now());
+                        match fc.download_files(&refs).await {
+                            Ok(local_paths) => {
+                                let _ = resp_tx.send(FileResponse::Downloaded(local_paths));
+                            }
+                            Err(e) => {
+                                recent_downloads.remove(&key);
+                                tracing::warn!("file download failed: {e}");
+                                let _ = resp_tx.send(FileResponse::Error(format!(
+                                    "File download failed: {e}"
+                                )));
+                            }
                         }
-                    },
+                    }
                     FileRequest::UploadImage { mut entry, info } => {
                         match fc.upload_image(&info).await {
                             Ok(img_ref) => {
@@ -157,12 +175,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     FileRequest::DownloadImage { img_ref } => {
+                        let key = download_image_key(&img_ref);
+                        recent_downloads.retain(|_, ts| ts.elapsed() < FILE_DOWNLOAD_DEDUP_TTL);
+                        if recent_downloads.contains_key(&key) {
+                            tracing::debug!("skipping duplicate image download: {key}");
+                            continue;
+                        }
+                        recent_downloads.insert(key.clone(), Instant::now());
                         match fc.download_image(&img_ref).await {
                             Ok(info) => {
                                 let _ = resp_tx.send(FileResponse::ImageDownloaded(info));
                             }
                             Err(e) => {
+                                recent_downloads.remove(&key);
                                 tracing::warn!("image download failed: {e}");
+                                let _ = resp_tx.send(FileResponse::Error(format!(
+                                    "Image download failed: {e}"
+                                )));
                             }
                         }
                     }
@@ -454,6 +483,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             local_paths.len(),
                             dir_display,
                         ));
+                    } else {
+                        let _ = o_clip_core::clipboard::take_self_write();
+                        app.manager.status_message =
+                            Some("Failed to set clipboard files".to_string());
                     }
                 }
                 FileResponse::ImageDownloaded(info) => {
@@ -476,7 +509,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "Image synced: {}x{} {:?}",
                             info.width, info.height, info.format
                         ));
+                    } else {
+                        let _ = o_clip_core::clipboard::take_self_write();
+                        app.manager.status_message =
+                            Some("Failed to set clipboard image".to_string());
                     }
+                }
+                FileResponse::Error(message) => {
+                    app.manager.status_message = Some(message);
                 }
             }
         }

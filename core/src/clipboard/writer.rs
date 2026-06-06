@@ -217,7 +217,9 @@ pub fn set_clipboard_image(info: &ImageInfo) -> bool {
 
     // For PNG entries (e.g. from macOS), convert to DIB so Windows apps can paste.
     let (format, dib_bytes): (u32, std::borrow::Cow<[u8]>) = match info.format {
-        super::content::ImageFormat::DibV5 => (CF_DIBV5.0 as u32, std::borrow::Cow::Borrowed(&bytes)),
+        super::content::ImageFormat::DibV5 => {
+            (CF_DIBV5.0 as u32, std::borrow::Cow::Borrowed(&bytes))
+        }
         super::content::ImageFormat::Dib | super::content::ImageFormat::Bitmap => {
             (CF_DIB.0 as u32, std::borrow::Cow::Borrowed(&bytes))
         }
@@ -309,8 +311,7 @@ pub fn set_clipboard_image(info: &ImageInfo) -> bool {
             objc2::class!(NSString),
             stringWithUTF8String: b"public.png\0".as_ptr()
         ];
-        let result: bool =
-            objc2::msg_send![&*pasteboard, setData: &*nsdata, forType: &*png_type];
+        let result: bool = objc2::msg_send![&*pasteboard, setData: &*nsdata, forType: &*png_type];
         result
     }
 }

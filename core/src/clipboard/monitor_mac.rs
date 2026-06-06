@@ -31,6 +31,8 @@ mod inner {
     /// Maximum raw image data size we'll store (10 MB).
     const MAX_IMAGE_STORE_SIZE: usize = 10 * 1024 * 1024;
 
+    const PLACEHOLDER_RESTORE_DELAYS_MS: &[u64] = &[120, 350, 750, 1_500, 3_000];
+
     /// Sensitivity check result (mirrors Windows `SensitivityInfo` semantics).
     #[derive(Debug, Clone, Copy)]
     struct SensitivityInfo {
@@ -129,11 +131,43 @@ mod inner {
                     return false;
                 }
 
-                // Try to read file URLs first (higher priority than text)
+                // Try to read file URLs first (higher priority than text), but
+                // avoid remote-control clipboard placeholder files. Tools like
+                // UU Remote and Sunlogin briefly put hidden temp file URLs on
+                // the pasteboard while the real image data is the useful payload.
                 if let Some(file_paths) = read_file_urls(&pasteboard) {
                     if !file_paths.is_empty() {
-                        tracing::debug!("macOS: captured {} file(s)", file_paths.len());
-                        let content = ClipboardContent::Files(file_paths);
+                        if crate::clipboard::all_remote_clipboard_placeholders(&file_paths) {
+                            tracing::debug!(
+                                "macOS: remote placeholder file(s) detected; trying image data"
+                            );
+                            if let Some(event) = read_image_event(&pasteboard, sensitivity.no_cloud)
+                            {
+                                restore_image_event_to_clipboard(&event);
+                                if tx.send(event).is_err() {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+
+                        let usable_paths =
+                            crate::clipboard::usable_clipboard_file_paths(file_paths);
+                        if usable_paths.is_empty() {
+                            tracing::debug!(
+                                "macOS: skipping deleted/unusable file path(s); trying image data"
+                            );
+                            if let Some(event) = read_image_event(&pasteboard, sensitivity.no_cloud)
+                            {
+                                if tx.send(event).is_err() {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+
+                        tracing::debug!("macOS: captured {} file(s)", usable_paths.len());
+                        let content = ClipboardContent::Files(usable_paths);
                         let event = ClipboardEvent {
                             content,
                             no_cloud: sensitivity.no_cloud,
@@ -166,6 +200,21 @@ mod inner {
                         if !cstr.is_null() {
                             let text = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
                             if !text.is_empty() {
+                                if crate::clipboard::is_remote_clipboard_placeholder_text(&text) {
+                                    tracing::debug!(
+                                        "macOS: remote placeholder text detected; trying image data"
+                                    );
+                                    if let Some(event) =
+                                        read_image_event(&pasteboard, sensitivity.no_cloud)
+                                    {
+                                        restore_image_event_to_clipboard(&event);
+                                        if tx.send(event).is_err() {
+                                            return true;
+                                        }
+                                    }
+                                    return false;
+                                }
+
                                 tracing::debug!("macOS: captured text ({} bytes)", text.len());
                                 let content = classify_text(text);
                                 let event = ClipboardEvent {
@@ -184,31 +233,7 @@ mod inner {
                 // Try to read image data from pasteboard.
                 // Strategy: prefer PNG data directly; fall back to TIFF and
                 // convert to PNG via NSBitmapImageRep.
-                if let Some(png_bytes) = read_image_as_png(&pasteboard) {
-                    let data_size = png_bytes.len();
-                    tracing::debug!("macOS: captured image ({} bytes PNG)", data_size);
-
-                    // Parse PNG IHDR for dimensions
-                    let (width, height, bits_per_pixel) = parse_png_ihdr(&png_bytes);
-
-                    let raw_data = if data_size <= MAX_IMAGE_STORE_SIZE {
-                        Some(BASE64.encode(&png_bytes))
-                    } else {
-                        None
-                    };
-
-                    let content = ClipboardContent::Image(ImageInfo {
-                        width,
-                        height,
-                        bits_per_pixel,
-                        data_size,
-                        format: ImageFormat::Png,
-                        raw_data,
-                    });
-                    let event = ClipboardEvent {
-                        content,
-                        no_cloud: sensitivity.no_cloud,
-                    };
+                if let Some(event) = read_image_event(&pasteboard, sensitivity.no_cloud) {
                     let _ = tx.send(event);
                 }
 
@@ -221,6 +246,132 @@ mod inner {
         }
 
         tracing::info!("macOS clipboard monitor stopped");
+    }
+
+    unsafe fn read_image_event(pasteboard: &AnyObject, no_cloud: bool) -> Option<ClipboardEvent> {
+        let png_bytes = unsafe { read_image_as_png(pasteboard) }?;
+        let data_size = png_bytes.len();
+        tracing::debug!("macOS: captured image ({} bytes PNG)", data_size);
+
+        // Parse PNG IHDR for dimensions
+        let (width, height, bits_per_pixel) = parse_png_ihdr(&png_bytes);
+
+        let raw_data = if data_size <= MAX_IMAGE_STORE_SIZE {
+            Some(BASE64.encode(&png_bytes))
+        } else {
+            None
+        };
+
+        Some(ClipboardEvent {
+            content: ClipboardContent::Image(ImageInfo {
+                width,
+                height,
+                bits_per_pixel,
+                data_size,
+                format: ImageFormat::Png,
+                raw_data,
+            }),
+            no_cloud,
+        })
+    }
+
+    fn restore_image_event_to_clipboard(event: &ClipboardEvent) {
+        let ClipboardContent::Image(info) = &event.content else {
+            return;
+        };
+
+        crate::clipboard::mark_self_write();
+        if crate::clipboard::writer::set_clipboard_image(info) {
+            tracing::debug!("macOS: restored remote placeholder as real image clipboard content");
+            schedule_placeholder_restore_guard(info.clone());
+        } else {
+            let _ = crate::clipboard::take_self_write();
+            tracing::warn!("macOS: failed to restore remote placeholder image to clipboard");
+        }
+    }
+
+    fn schedule_placeholder_restore_guard(info: ImageInfo) {
+        std::thread::spawn(move || {
+            for (attempt, delay_ms) in PLACEHOLDER_RESTORE_DELAYS_MS.iter().enumerate() {
+                std::thread::sleep(Duration::from_millis(*delay_ms));
+                let stolen = autoreleasepool(|_| unsafe {
+                    let pasteboard: Retained<AnyObject> =
+                        msg_send![class!(NSPasteboard), generalPasteboard];
+                    pasteboard_was_stolen_by_remote_placeholder(&pasteboard)
+                });
+                if !stolen {
+                    continue;
+                }
+
+                crate::clipboard::mark_self_write();
+                if crate::clipboard::writer::set_clipboard_image(&info) {
+                    tracing::debug!(
+                        "macOS: reclaimed image clipboard from remote placeholder, attempt {}",
+                        attempt + 1
+                    );
+                } else {
+                    let _ = crate::clipboard::take_self_write();
+                    tracing::warn!(
+                        "macOS: failed to reclaim image clipboard from remote placeholder"
+                    );
+                }
+            }
+        });
+    }
+
+    unsafe fn pasteboard_was_stolen_by_remote_placeholder(pasteboard: &AnyObject) -> bool {
+        let types: Option<Retained<AnyObject>> = unsafe { msg_send![pasteboard, types] };
+        let Some(types) = types else {
+            return true;
+        };
+        let count: usize = unsafe { msg_send![&*types, count] };
+        if count == 0 {
+            return true;
+        }
+
+        if let Some(file_paths) = unsafe { read_file_urls(pasteboard) } {
+            if crate::clipboard::all_remote_clipboard_placeholders(&file_paths) {
+                return true;
+            }
+        }
+
+        if let Some(text) = unsafe { read_first_string(pasteboard) } {
+            return crate::clipboard::is_remote_clipboard_placeholder_text(&text);
+        }
+
+        false
+    }
+
+    unsafe fn read_first_string(pasteboard: &AnyObject) -> Option<String> {
+        let nsstring_class: Retained<AnyObject> = unsafe { msg_send![class!(NSString), class] };
+        let classes: Retained<AnyObject> =
+            unsafe { msg_send![class!(NSArray), arrayWithObject: &*nsstring_class] };
+        let options: Retained<AnyObject> = unsafe { msg_send![class!(NSDictionary), dictionary] };
+
+        let objects: Option<Retained<AnyObject>> = unsafe {
+            msg_send![
+                pasteboard,
+                readObjectsForClasses: &*classes,
+                options: &*options
+            ]
+        };
+
+        let objects = objects?;
+        let count: usize = unsafe { msg_send![&*objects, count] };
+        if count == 0 {
+            return None;
+        }
+
+        let first: Retained<AnyObject> = unsafe { msg_send![&*objects, objectAtIndex: 0usize] };
+        let cstr: *const std::ffi::c_char = unsafe { msg_send![&*first, UTF8String] };
+        if cstr.is_null() {
+            return None;
+        }
+
+        let text = unsafe { std::ffi::CStr::from_ptr(cstr) }
+            .to_string_lossy()
+            .to_string();
+        (!text.is_empty()).then_some(text)
     }
 
     /// Read file URLs from NSPasteboard and return as PathBuf vector.

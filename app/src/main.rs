@@ -14,12 +14,16 @@ use wry::WebViewBuilder;
 use o_clip_core::clipboard::{self, ClipboardContent, ClipboardEvent};
 use o_clip_core::config::Config;
 use o_clip_core::entry_manager::EntryManager;
-use o_clip_core::file_transfer::{FileRequest, FileResponse, FileTransferClient};
+use o_clip_core::file_transfer::{
+    FileRequest, FileResponse, FileTransferClient, download_files_key, download_image_key,
+};
 use o_clip_core::store::{ClipboardEntry, EntrySource, Store};
 use o_clip_core::sync::{ConnectionStatus, SyncCommand, SyncEvent};
 
 #[cfg(target_os = "windows")]
 use o_clip_core::clipboard::ClipboardMonitor;
+
+const FILE_DOWNLOAD_DEDUP_TTL: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Custom events for the tao event loop
@@ -31,7 +35,10 @@ enum AppEvent {
     File(FileResponse),
     Ipc(String),
     /// Image encoded on background thread, ready to push to WebView.
-    ImageReady { id: i64, data_url: String },
+    ImageReady {
+        id: i64,
+        data_url: String,
+    },
     /// Entries loaded from DB on background thread.
     EntriesLoaded {
         entries: Vec<ClipboardEntry>,
@@ -113,11 +120,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // ---- WebSocket sync + file transfer -----------------------------------
-    let (ws_outbound_tx, ws_outbound_rx) =
-        tokio::sync::mpsc::unbounded_channel::<SyncCommand>();
+    let (ws_outbound_tx, ws_outbound_rx) = tokio::sync::mpsc::unbounded_channel::<SyncCommand>();
     let (ws_event_tx, ws_event_rx) = std::sync::mpsc::channel::<SyncEvent>();
-    let (file_req_tx, file_req_rx) =
-        tokio::sync::mpsc::unbounded_channel::<FileRequest>();
+    let (file_req_tx, file_req_rx) = tokio::sync::mpsc::unbounded_channel::<FileRequest>();
     let (file_resp_tx, file_resp_rx) = std::sync::mpsc::channel::<FileResponse>();
     let reconnect_notify = Arc::new(tokio::sync::Notify::new());
 
@@ -200,10 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "Auto-start disabled"
                     };
                     push_status(&webview, msg);
-                    let _ = webview.evaluate_script(&format!(
-                        "onAutostart({})",
-                        new_state
-                    ));
+                    let _ = webview.evaluate_script(&format!("onAutostart({})", new_state));
                 } else {
                     push_status(&webview, "Failed to change auto-start setting");
                 }
@@ -493,7 +495,10 @@ fn handle_clipboard_event(
     let is_echo = recent_hashes.remove(&content_hash).is_some();
 
     if is_echo {
-        tracing::debug!("skipping echo: {}", &content_hash[..16.min(content_hash.len())]);
+        tracing::debug!(
+            "skipping echo: {}",
+            &content_hash[..16.min(content_hash.len())]
+        );
     } else if !event.no_cloud {
         match &event.content {
             ClipboardContent::Files(paths) => {
@@ -683,7 +688,13 @@ fn handle_file_response(
                     webview,
                     &format!("Image synced: {}x{}", info.width, info.height),
                 );
+            } else {
+                let _ = clipboard::take_self_write();
+                push_status(webview, "Failed to set clipboard image");
             }
+        }
+        FileResponse::Error(message) => {
+            push_status(webview, &message);
         }
     }
 }
@@ -778,10 +789,7 @@ fn spawn_load_entries(
             store.list_metadata(500, 0).unwrap_or_default()
         };
         let total = store.count().unwrap_or(0);
-        let _ = proxy.send_event(AppEvent::EntriesLoaded {
-            entries,
-            total,
-        });
+        let _ = proxy.send_event(AppEvent::EntriesLoaded { entries, total });
     });
 }
 
@@ -1011,10 +1019,8 @@ fn create_tray_icon() -> Result<(tray_icon::TrayIcon, TrayMenuIds), Box<dyn std:
 // ---------------------------------------------------------------------------
 
 fn position_window(window: &tao::window::Window, event: &tray_icon::TrayIconEvent) {
-    let (_pos, rect) = match event {
-        tray_icon::TrayIconEvent::Click {
-            position, rect, ..
-        } => (position, rect),
+    let (pos, rect) = match event {
+        tray_icon::TrayIconEvent::Click { position, rect, .. } => (position, rect),
         _ => return,
     };
 
@@ -1113,6 +1119,7 @@ fn spawn_sync_runtime(
         let ws_tx = ws_outbound_tx;
         let resp_tx = file_resp_tx;
         rt.spawn(async move {
+            let mut recent_downloads: HashMap<String, Instant> = HashMap::new();
             while let Some(req) = file_req_rx.recv().await {
                 match req {
                     FileRequest::Upload { mut entry, paths } => {
@@ -1128,12 +1135,27 @@ fn spawn_sync_runtime(
                             Err(e) => tracing::warn!("file upload failed: {e}"),
                         }
                     }
-                    FileRequest::Download { refs } => match fc.download_files(&refs).await {
-                        Ok(local_paths) => {
-                            let _ = resp_tx.send(FileResponse::Downloaded(local_paths));
+                    FileRequest::Download { refs } => {
+                        let key = download_files_key(&refs);
+                        recent_downloads.retain(|_, ts| ts.elapsed() < FILE_DOWNLOAD_DEDUP_TTL);
+                        if recent_downloads.contains_key(&key) {
+                            tracing::debug!("skipping duplicate file download: {key}");
+                            continue;
                         }
-                        Err(e) => tracing::warn!("file download failed: {e}"),
-                    },
+                        recent_downloads.insert(key.clone(), Instant::now());
+                        match fc.download_files(&refs).await {
+                            Ok(local_paths) => {
+                                let _ = resp_tx.send(FileResponse::Downloaded(local_paths));
+                            }
+                            Err(e) => {
+                                recent_downloads.remove(&key);
+                                tracing::warn!("file download failed: {e}");
+                                let _ = resp_tx.send(FileResponse::Error(format!(
+                                    "File download failed: {e}"
+                                )));
+                            }
+                        }
+                    }
                     FileRequest::UploadImage { mut entry, info } => {
                         match fc.upload_image(&info).await {
                             Ok(img_ref) => {
@@ -1148,11 +1170,24 @@ fn spawn_sync_runtime(
                         }
                     }
                     FileRequest::DownloadImage { img_ref } => {
+                        let key = download_image_key(&img_ref);
+                        recent_downloads.retain(|_, ts| ts.elapsed() < FILE_DOWNLOAD_DEDUP_TTL);
+                        if recent_downloads.contains_key(&key) {
+                            tracing::debug!("skipping duplicate image download: {key}");
+                            continue;
+                        }
+                        recent_downloads.insert(key.clone(), Instant::now());
                         match fc.download_image(&img_ref).await {
                             Ok(info) => {
                                 let _ = resp_tx.send(FileResponse::ImageDownloaded(info));
                             }
-                            Err(e) => tracing::warn!("image download failed: {e}"),
+                            Err(e) => {
+                                recent_downloads.remove(&key);
+                                tracing::warn!("image download failed: {e}");
+                                let _ = resp_tx.send(FileResponse::Error(format!(
+                                    "Image download failed: {e}"
+                                )));
+                            }
                         }
                     }
                 }
@@ -1205,17 +1240,14 @@ fn is_autostart_enabled() -> bool {
     let key_path = HSTRING::from("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
     let mut hkey = HKEY::default();
 
-    let result = unsafe {
-        RegOpenKeyExW(HKEY_CURRENT_USER, &key_path, Some(0), KEY_READ, &mut hkey)
-    };
+    let result =
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, &key_path, Some(0), KEY_READ, &mut hkey) };
     if result.is_err() {
         return false;
     }
 
     let value_name = HSTRING::from(APP_NAME);
-    let result = unsafe {
-        RegQueryValueExW(hkey, &value_name, None, None, None, None)
-    };
+    let result = unsafe { RegQueryValueExW(hkey, &value_name, None, None, None, None) };
     let _ = unsafe { RegCloseKey(hkey) };
     result.is_ok()
 }
@@ -1257,9 +1289,7 @@ fn set_autostart(enable: bool) -> bool {
         let wide: Vec<u16> = exe_str.encode_utf16().chain(std::iter::once(0)).collect();
         let data =
             unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
-        let result = unsafe {
-            RegSetValueExW(hkey, &value_name, Some(0), REG_SZ, Some(data))
-        };
+        let result = unsafe { RegSetValueExW(hkey, &value_name, Some(0), REG_SZ, Some(data)) };
         result.is_ok()
     } else {
         let result = unsafe { RegDeleteValueW(hkey, &value_name) };
@@ -1316,6 +1346,5 @@ fn set_autostart(enable: bool) -> bool {
 #[cfg(target_os = "macos")]
 fn macos_launch_agent_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(home)
-        .join("Library/LaunchAgents/com.o-clip.app.plist")
+    std::path::PathBuf::from(home).join("Library/LaunchAgents/com.o-clip.app.plist")
 }

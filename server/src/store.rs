@@ -102,6 +102,18 @@ impl Store {
     ) -> rusqlite::Result<bool> {
         let conn = self.conn.lock().unwrap();
 
+        if !client_hash.is_empty() {
+            let updated = conn.execute(
+                "UPDATE entries
+                 SET created_at = ?1
+                 WHERE client_hash = ?2",
+                params![entry.created_at.to_rfc3339(), client_hash],
+            )?;
+            if updated > 0 {
+                return Ok(false);
+            }
+        }
+
         // Check if this hash already exists before inserting.
         // ON CONFLICT DO UPDATE always reports 1 changed row, so we can't
         // distinguish insert from update via changes() alone.
@@ -144,9 +156,8 @@ impl Store {
     ) -> rusqlite::Result<(usize, Vec<(i64, String, String)>)> {
         let conn = self.conn.lock().unwrap();
         // Collect entries to be deleted (for file cleanup).
-        let mut stmt = conn.prepare(
-            "SELECT id, content_type, content FROM entries WHERE created_at < ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, content_type, content FROM entries WHERE created_at < ?1")?;
         let to_delete: Vec<(i64, String, String)> = stmt
             .query_map(params![before_rfc3339], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -167,7 +178,7 @@ impl Store {
     ) -> rusqlite::Result<Vec<ClipboardEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, content_type, content, preview, hash, byte_size, created_at
+            "SELECT id, content_type, content, preview, hash, byte_size, created_at, client_hash
              FROM entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
@@ -180,7 +191,7 @@ impl Store {
                 byte_size: row.get(5)?,
                 synced: true,
                 created_at: parse_datetime(row.get::<_, String>(6)?),
-                client_hash: String::new(),
+                client_hash: row.get(7)?,
             })
         })?;
         rows.collect()
@@ -191,7 +202,7 @@ impl Store {
         let actual_limit = limit.min(max_limit);
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, content_type, content, preview, hash, byte_size, created_at
+            "SELECT id, content_type, content, preview, hash, byte_size, created_at, client_hash
              FROM entries ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![actual_limit as i64], |row| {
@@ -204,7 +215,7 @@ impl Store {
                 byte_size: row.get(5)?,
                 synced: true,
                 created_at: parse_datetime(row.get::<_, String>(6)?),
-                client_hash: String::new(),
+                client_hash: row.get(7)?,
             })
         })?;
         rows.collect()
@@ -464,6 +475,22 @@ mod tests {
 
         // Empty client hash should always return false
         assert!(!store.has_client_hash("").unwrap());
+    }
+
+    #[test]
+    fn dedup_by_client_hash() {
+        let (store, _dir) = temp_store();
+
+        let first = make_entry("synced image as dib");
+        let mut second = make_entry("synced image as png");
+        second.created_at = first.created_at + chrono::Duration::seconds(1);
+
+        let client_hash = "pixel_hash_same_image";
+        assert!(store.insert(&first, "c1", client_hash).unwrap());
+        assert!(!store.insert(&second, "c2", client_hash).unwrap());
+
+        assert_eq!(store.count().unwrap(), 1);
+        assert!(store.has_client_hash(client_hash).unwrap());
     }
 
     #[test]

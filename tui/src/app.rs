@@ -179,7 +179,7 @@ impl App {
             }
             ClipboardContent::SyncedFiles(refs) => {
                 self.manager.status_message = Some(format!(
-                    "{} synced file(s) - select and download first",
+                    "{} synced file(s) - press f to download",
                     refs.len()
                 ));
             }
@@ -198,10 +198,8 @@ impl App {
                 }
             }
             ClipboardContent::SyncedImage(img_ref) => {
-                // SyncedImage data is on the server; cannot restore directly from history.
-                // The image was already written to clipboard when it was synced.
                 self.manager.status_message = Some(format!(
-                    "Synced image {}x{} - data stored on server",
+                    "Synced image {}x{} - press f to download",
                     img_ref.width, img_ref.height
                 ));
             }
@@ -211,7 +209,7 @@ impl App {
         }
     }
 
-    /// Re-download synced files for the selected entry.
+    /// Re-download synced files/images for the selected entry.
     /// Returns a FileRequest if re-fetch is possible.
     pub fn refetch_selected_files(&mut self) -> Option<FileRequest> {
         self.manager.ensure_selected_content_loaded();
@@ -221,6 +219,13 @@ impl App {
                 let n = refs.len();
                 self.manager.status_message = Some(format!("Re-downloading {n} file(s)..."));
                 Some(FileRequest::Download { refs })
+            }
+            ClipboardContent::SyncedImage(img_ref) => {
+                self.manager.status_message = Some(format!(
+                    "Re-downloading image {}x{}...",
+                    img_ref.width, img_ref.height
+                ));
+                Some(FileRequest::DownloadImage { img_ref })
             }
             ClipboardContent::Files(paths) => {
                 let any_missing = paths.iter().any(|p| !p.exists());
@@ -233,7 +238,7 @@ impl App {
                 None
             }
             _ => {
-                self.manager.status_message = Some("Not a file entry".to_string());
+                self.manager.status_message = Some("Not a synced file/image entry".to_string());
                 None
             }
         }

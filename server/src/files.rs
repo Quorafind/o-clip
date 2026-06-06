@@ -41,8 +41,7 @@ pub async fn file_upload_handler(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, axum::response::Response> {
-    check_auth(&headers, &state.config.password)
-        .map_err(|s| s.into_response())?;
+    check_auth(&headers, &state.config.password).map_err(|s| s.into_response())?;
 
     let max_file_size = state.config.max_file_size;
     let max_total = state.config.max_total_file_storage;
@@ -67,8 +66,7 @@ pub async fn file_upload_handler(
                 let data = match field.bytes().await {
                     Ok(d) => d,
                     Err(e) => {
-                        let reason =
-                            format!("failed to read multipart field '{filename}': {e}");
+                        let reason = format!("failed to read multipart field '{filename}': {e}");
                         tracing::warn!("{reason}");
                         skip_reason = Some(reason);
                         continue;
@@ -90,8 +88,7 @@ pub async fn file_upload_handler(
                 // Check total storage again
                 let current_total = state.store.total_file_bytes().unwrap_or(0) as u64;
                 if current_total + data.len() as u64 > max_total {
-                    let reason =
-                        format!("file storage would exceed limit, skipping {filename}");
+                    let reason = format!("file storage would exceed limit, skipping {filename}");
                     tracing::warn!("{reason}");
                     skip_reason = Some(reason);
                     continue;

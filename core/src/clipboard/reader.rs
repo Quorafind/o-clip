@@ -136,7 +136,24 @@ impl ClipboardGuard {
         // 1. Check for files (CF_HDROP) first
         if unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32).is_ok() } {
             match self.read_files() {
-                Ok(paths) if !paths.is_empty() => return ClipboardContent::Files(paths),
+                Ok(paths) if !paths.is_empty() => {
+                    if crate::clipboard::all_remote_clipboard_placeholders(&paths) {
+                        tracing::debug!(
+                            "clipboard: remote placeholder file(s) detected; trying image formats"
+                        );
+                        return self.try_read_image().unwrap_or(ClipboardContent::Empty);
+                    }
+
+                    let usable_paths = crate::clipboard::usable_clipboard_file_paths(paths);
+                    if !usable_paths.is_empty() {
+                        return ClipboardContent::Files(usable_paths);
+                    }
+
+                    tracing::debug!(
+                        "clipboard: skipping deleted/unusable file path(s); trying image formats"
+                    );
+                    return self.try_read_image().unwrap_or(ClipboardContent::Empty);
+                }
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!("failed to read CF_HDROP: {e}");

@@ -13,7 +13,9 @@ use chrono::Local;
 use o_clip_core::clipboard::{self, ClipboardContent, ClipboardEvent};
 use o_clip_core::config::Config;
 use o_clip_core::entry_manager::EntryManager;
-use o_clip_core::file_transfer::{FileRequest, FileResponse, FileTransferClient};
+use o_clip_core::file_transfer::{
+    FileRequest, FileResponse, FileTransferClient, download_files_key, download_image_key,
+};
 use o_clip_core::store::{ClipboardEntry, EntrySource, Store};
 use o_clip_core::sync::{ConnectionStatus, SyncCommand, SyncEvent};
 
@@ -29,6 +31,7 @@ const STATUS_MIN_H: u32 = 24;
 
 const CHANNEL_TICK_MS: u64 = 100;
 const REMOTE_HASH_TTL: Duration = Duration::from_secs(10);
+const FILE_DOWNLOAD_DEDUP_TTL: Duration = Duration::from_secs(5);
 
 const SETTINGS_PAD: i32 = 12;
 const SETTINGS_ROW_H: i32 = 28;
@@ -1247,6 +1250,40 @@ impl App {
             return;
         };
 
+        match &content {
+            ClipboardContent::SyncedFiles(refs) => {
+                let state = self.state.borrow();
+                if let Some(tx) = state.file_req_tx.as_ref() {
+                    let n = refs.len();
+                    let _ = tx.send(FileRequest::Download { refs: refs.clone() });
+                    drop(state);
+                    self.update_status_bar(Some(&format!("Re-downloading {n} file(s)...")));
+                } else {
+                    drop(state);
+                    self.update_status_bar(Some("File transfer not available"));
+                }
+                return;
+            }
+            ClipboardContent::SyncedImage(img_ref) => {
+                let state = self.state.borrow();
+                if let Some(tx) = state.file_req_tx.as_ref() {
+                    let _ = tx.send(FileRequest::DownloadImage {
+                        img_ref: img_ref.clone(),
+                    });
+                    drop(state);
+                    self.update_status_bar(Some(&format!(
+                        "Re-downloading image {}x{}...",
+                        img_ref.width, img_ref.height
+                    )));
+                } else {
+                    drop(state);
+                    self.update_status_bar(Some("File transfer not available"));
+                }
+                return;
+            }
+            _ => {}
+        }
+
         let ok = match content {
             ClipboardContent::Text(t) => {
                 clipboard::mark_self_write();
@@ -1280,8 +1317,8 @@ impl App {
                 }
                 ok
             }
-            ClipboardContent::SyncedFiles(_) | ClipboardContent::SyncedImage(_) => false,
             ClipboardContent::Empty => false,
+            ClipboardContent::SyncedFiles(_) | ClipboardContent::SyncedImage(_) => false,
         };
 
         if ok {
@@ -1375,6 +1412,22 @@ impl App {
                     self.update_status_bar(Some("File transfer not available"));
                 }
             }
+            ClipboardContent::SyncedImage(img_ref) => {
+                let state = self.state.borrow();
+                if let Some(tx) = state.file_req_tx.as_ref() {
+                    let _ = tx.send(FileRequest::DownloadImage {
+                        img_ref: img_ref.clone(),
+                    });
+                    drop(state);
+                    self.update_status_bar(Some(&format!(
+                        "Re-downloading image {}x{}...",
+                        img_ref.width, img_ref.height
+                    )));
+                } else {
+                    drop(state);
+                    self.update_status_bar(Some("File transfer not available"));
+                }
+            }
             ClipboardContent::Files(paths) => {
                 let any_missing = paths.iter().any(|p| !p.exists());
                 if any_missing {
@@ -1386,7 +1439,7 @@ impl App {
                 }
             }
             _ => {
-                self.update_status_bar(Some("Not a file entry"));
+                self.update_status_bar(Some("Not a synced file/image entry"));
             }
         }
     }
@@ -1469,34 +1522,114 @@ impl App {
                             if is_files {
                                 if let ClipboardContent::Files(paths) = &event.content {
                                     if let Some(tx) = file_req_tx.as_ref() {
-                                        let _ = tx.send(FileRequest::Upload {
+                                        match tx.send(FileRequest::Upload {
                                             entry: entry.clone(),
                                             paths: paths.clone(),
-                                        });
+                                        }) {
+                                            Ok(()) => {
+                                                manager.status_message = Some(format!(
+                                                    "Queued {} file(s) for upload",
+                                                    paths.len()
+                                                ));
+                                                needs_status = true;
+                                            }
+                                            Err(_) => {
+                                                manager.status_message = Some(
+                                                    "File upload queue is unavailable".to_string(),
+                                                );
+                                                needs_status = true;
+                                            }
+                                        }
+                                    } else {
+                                        manager.status_message = Some(
+                                            "File upload unavailable: not connected".to_string(),
+                                        );
+                                        needs_status = true;
                                     }
                                 }
                             } else if is_image {
                                 if let ClipboardContent::Image(info) = &event.content {
                                     if info.raw_data.is_none() {
-                                        tracing::debug!("skipping image sync: no raw_data");
-                                    } else if info.data_size <= image_inline_threshold {
-                                        if (entry.byte_size as usize) <= max_sync_size {
-                                            if let Some(tx) = ws_outbound_tx.as_ref() {
-                                                let _ = tx.send(SyncCommand::SendEntry(entry.clone()));
+                                        let message =
+                                            "Skipping image sync: no raw image data".to_string();
+                                        tracing::debug!("{message}");
+                                        manager.status_message = Some(message);
+                                        needs_status = true;
+                                    } else if info.data_size <= image_inline_threshold
+                                        && (entry.byte_size as usize) <= max_sync_size
+                                    {
+                                        // Small image: sync inline as base64.
+                                        if let Some(tx) = ws_outbound_tx.as_ref() {
+                                            match tx.send(SyncCommand::SendEntry(entry.clone())) {
+                                                Ok(()) => {
+                                                    manager.status_message = Some(format!(
+                                                        "Syncing image inline: {}x{} ({} bytes)",
+                                                        info.width, info.height, info.data_size
+                                                    ));
+                                                    needs_status = true;
+                                                }
+                                                Err(_) => {
+                                                    manager.status_message = Some(
+                                                        "Image sync queue is unavailable"
+                                                            .to_string(),
+                                                    );
+                                                    needs_status = true;
+                                                }
                                             }
+                                        } else {
+                                            manager.status_message = Some(
+                                                "Image sync unavailable: not connected".to_string(),
+                                            );
+                                            needs_status = true;
                                         }
                                     } else if let Some(tx) = file_req_tx.as_ref() {
-                                        let _ = tx.send(FileRequest::UploadImage {
+                                        // Large image, or inline JSON would exceed max_sync_size:
+                                        // upload the raw image bytes and send a SyncedImage entry.
+                                        match tx.send(FileRequest::UploadImage {
                                             entry: entry.clone(),
                                             info: info.clone(),
-                                        });
+                                        }) {
+                                            Ok(()) => {
+                                                manager.status_message = Some(format!(
+                                                    "Queued image upload: {}x{} ({} bytes)",
+                                                    info.width, info.height, info.data_size
+                                                ));
+                                                needs_status = true;
+                                            }
+                                            Err(_) => {
+                                                manager.status_message = Some(
+                                                    "Image upload queue is unavailable".to_string(),
+                                                );
+                                                needs_status = true;
+                                            }
+                                        }
+                                    } else {
+                                        manager.status_message = Some(
+                                            "Image upload unavailable: not connected".to_string(),
+                                        );
+                                        needs_status = true;
                                     }
                                 }
                             } else if (entry.byte_size as usize) <= max_sync_size {
                                 if let Some(tx) = ws_outbound_tx.as_ref() {
-                                    let _ = tx.send(SyncCommand::SendEntry(entry.clone()));
+                                    if tx.send(SyncCommand::SendEntry(entry.clone())).is_err() {
+                                        manager.status_message =
+                                            Some("Sync queue is unavailable".to_string());
+                                        needs_status = true;
+                                    }
                                 }
+                            } else {
+                                manager.status_message = Some(format!(
+                                    "Entry too large to sync inline: {} bytes (limit {})",
+                                    entry.byte_size, max_sync_size
+                                ));
+                                needs_status = true;
                             }
+                        } else {
+                            manager.status_message = Some(
+                                "Clipboard item marked no-cloud; stored locally only".to_string(),
+                            );
+                            needs_status = true;
                         }
 
                         manager.on_new_entry(entry);
@@ -1522,14 +1655,18 @@ impl App {
                         match ws_event {
                             SyncEvent::RemoteEntry(mut entry) => {
                                 entry.source = EntrySource::Remote;
+                                let client_hash = entry.client_hash.clone();
 
                                 // Normalize hash first so we can check local DB.
                                 o_clip_core::normalize_entry_hash(&mut entry);
 
-                                // Check if this entry already exists in our local DB.
-                                // If so, skip download and auto-copy to prevent echo loops
-                                // when multiple clients (GUI + TUI) share the same clipboard.
-                                let already_exists = manager.store().has_hash(&entry.hash);
+                                // Check if this entry already exists in our local DB. For
+                                // uploaded files/images, the remote Synced* hash differs from
+                                // the original local clipboard hash, so also use client_hash to
+                                // suppress our own upload echo.
+                                let already_exists = manager.store().has_hash(&entry.hash)
+                                    || (!client_hash.is_empty()
+                                        && manager.store().has_hash(&client_hash));
 
                                 if !already_exists {
                                     if let Some(content) = entry.to_clipboard_content() {
@@ -1554,25 +1691,42 @@ impl App {
                                     }
 
                                     o_clip_core::auto_copy_to_clipboard(&entry);
+                                    pending_entries.push(entry);
+                                    needs_refresh = true;
                                 } else {
                                     tracing::debug!(
                                         "skipping auto-copy/download for existing entry: {}",
                                         &entry.hash[..entry.hash.len().min(16)]
                                     );
                                 }
-
-                                pending_entries.push(entry);
-                                needs_refresh = true;
                             }
                             SyncEvent::SyncBatch(entries) => {
                                 let n = entries.len();
-                                pending_entries.extend(entries.into_iter().map(|mut e| {
-                                    e.source = EntrySource::Remote;
-                                    o_clip_core::normalize_entry_hash(&mut e);
-                                    e
-                                }));
-                                tracing::info!("collected sync batch of {n} entries");
-                                needs_refresh = true;
+                                let mut skipped = 0usize;
+                                let batch: Vec<ClipboardEntry> = entries
+                                    .into_iter()
+                                    .filter_map(|mut e| {
+                                        e.source = EntrySource::Remote;
+                                        let client_hash = e.client_hash.clone();
+                                        o_clip_core::normalize_entry_hash(&mut e);
+                                        if manager.store().has_hash(&e.hash)
+                                            || (!client_hash.is_empty()
+                                                && manager.store().has_hash(&client_hash))
+                                        {
+                                            skipped += 1;
+                                            None
+                                        } else {
+                                            Some(e)
+                                        }
+                                    })
+                                    .collect();
+                                if !batch.is_empty() {
+                                    pending_entries.extend(batch);
+                                    needs_refresh = true;
+                                }
+                                tracing::info!(
+                                    "collected sync batch of {n} entries, skipped {skipped} existing"
+                                );
                             }
                             SyncEvent::StatusChanged(status) => {
                                 manager.ws_status = status;
@@ -1650,6 +1804,10 @@ impl App {
                                         info.width, info.height, info.format
                                     ));
                                 }
+                                needs_status = true;
+                            }
+                            FileResponse::Error(message) => {
+                                manager.status_message = Some(message);
                                 needs_status = true;
                             }
                         }
@@ -1733,6 +1891,7 @@ impl App {
             let ws_tx = ws_outbound_tx_clone;
             let resp_tx = file_resp_tx;
             rt.spawn(async move {
+                let mut recent_downloads: HashMap<String, Instant> = HashMap::new();
                 while let Some(req) = file_req_rx.recv().await {
                     match req {
                         FileRequest::Upload { mut entry, paths } => {
@@ -1752,14 +1911,27 @@ impl App {
                                 }
                             }
                         }
-                        FileRequest::Download { refs } => match fc.download_files(&refs).await {
-                            Ok(local_paths) => {
-                                let _ = resp_tx.send(FileResponse::Downloaded(local_paths));
+                        FileRequest::Download { refs } => {
+                            let key = download_files_key(&refs);
+                            recent_downloads.retain(|_, ts| ts.elapsed() < FILE_DOWNLOAD_DEDUP_TTL);
+                            if recent_downloads.contains_key(&key) {
+                                tracing::debug!("skipping duplicate file download: {key}");
+                                continue;
                             }
-                            Err(e) => {
-                                tracing::warn!("file download failed: {e}");
+                            recent_downloads.insert(key.clone(), Instant::now());
+                            match fc.download_files(&refs).await {
+                                Ok(local_paths) => {
+                                    let _ = resp_tx.send(FileResponse::Downloaded(local_paths));
+                                }
+                                Err(e) => {
+                                    recent_downloads.remove(&key);
+                                    tracing::warn!("file download failed: {e}");
+                                    let _ = resp_tx.send(FileResponse::Error(format!(
+                                        "File download failed: {e}"
+                                    )));
+                                }
                             }
-                        },
+                        }
                         FileRequest::UploadImage { mut entry, info } => {
                             match fc.upload_image(&info).await {
                                 Ok(img_ref) => {
@@ -1778,12 +1950,23 @@ impl App {
                             }
                         }
                         FileRequest::DownloadImage { img_ref } => {
+                            let key = download_image_key(&img_ref);
+                            recent_downloads.retain(|_, ts| ts.elapsed() < FILE_DOWNLOAD_DEDUP_TTL);
+                            if recent_downloads.contains_key(&key) {
+                                tracing::debug!("skipping duplicate image download: {key}");
+                                continue;
+                            }
+                            recent_downloads.insert(key.clone(), Instant::now());
                             match fc.download_image(&img_ref).await {
                                 Ok(info) => {
                                     let _ = resp_tx.send(FileResponse::ImageDownloaded(info));
                                 }
                                 Err(e) => {
+                                    recent_downloads.remove(&key);
                                     tracing::warn!("image download failed: {e}");
+                                    let _ = resp_tx.send(FileResponse::Error(format!(
+                                        "Image download failed: {e}"
+                                    )));
                                 }
                             }
                         }

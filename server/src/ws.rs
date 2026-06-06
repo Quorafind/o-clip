@@ -201,6 +201,7 @@ async fn handle_client_message(
             // Server recomputes hash and byte_size to prevent client-side forgery
             entry.hash = entry.compute_server_hash();
             entry.byte_size = entry.content.len() as i64;
+            entry.client_hash = client_hash.clone();
 
             // Validate entry size against server limit
             if entry.byte_size > state.config.max_entry_bytes as i64 {

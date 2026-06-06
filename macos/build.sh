@@ -16,7 +16,9 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$BUILD_DIR"
 swiftc "$SCRIPT_DIR/OClipApp.swift" \
     -o "$MACOS_DIR/$EXECUTABLE_NAME" \
     -framework AppKit \
+    -framework Combine \
     -framework Foundation \
+    -framework SwiftUI \
     -lsqlite3
 
 cp "$SCRIPT_DIR/Info.plist" "$CONTENTS_DIR/Info.plist"

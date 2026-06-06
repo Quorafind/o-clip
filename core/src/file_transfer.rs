@@ -22,7 +22,10 @@ pub enum FileRequest {
     /// Download SyncedFiles from server.
     Download { refs: Vec<FileRef> },
     /// Upload image to server, then send the resulting SyncedImage entry via WS.
-    UploadImage { entry: ClipboardEntry, info: ImageInfo },
+    UploadImage {
+        entry: ClipboardEntry,
+        info: ImageInfo,
+    },
     /// Download SyncedImage from server.
     DownloadImage { img_ref: ImageRef },
 }
@@ -33,6 +36,21 @@ pub enum FileResponse {
     Downloaded(Vec<PathBuf>),
     /// Image downloaded successfully; set this ImageInfo on the clipboard.
     ImageDownloaded(ImageInfo),
+    /// File transfer failed; surface the error to the UI.
+    Error(String),
+}
+
+pub fn download_files_key(refs: &[FileRef]) -> String {
+    let mut ids = refs
+        .iter()
+        .map(|file_ref| file_ref.file_id.as_str())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    format!("files:{}", ids.join("\0"))
+}
+
+pub fn download_image_key(img_ref: &ImageRef) -> String {
+    format!("image:{}", img_ref.image_id)
 }
 
 /// HTTP client for uploading/downloading files to/from the sync server.
@@ -140,11 +158,7 @@ impl FileTransferClient {
             }
         }
 
-        tracing::info!(
-            "uploading {} files to {}",
-            paths.len(),
-            url
-        );
+        tracing::info!("uploading {} files to {}", paths.len(), url);
 
         let resp = req
             .send()
@@ -287,9 +301,7 @@ impl FileTransferClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "image upload failed with status {status}: {body}"
-            ));
+            return Err(format!("image upload failed with status {status}: {body}"));
         }
 
         let body: UploadResponse = resp

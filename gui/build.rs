@@ -7,4 +7,3 @@ fn main() {
         embed_resource::compile("o-clip-gui.rc", embed_resource::NONE);
     }
 }
-

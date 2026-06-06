@@ -6,11 +6,7 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateDIBSection, DIB_RGB_COLORS, HBITMAP,
 };
 
-pub fn dynamic_image_to_hbitmap(
-    img: &DynamicImage,
-    max_w: u32,
-    max_h: u32,
-) -> Option<HBITMAP> {
+pub fn dynamic_image_to_hbitmap(img: &DynamicImage, max_w: u32, max_h: u32) -> Option<HBITMAP> {
     if max_w == 0 || max_h == 0 {
         return None;
     }
@@ -40,9 +36,7 @@ pub fn dynamic_image_to_hbitmap(
 
     let rgba = img.to_rgba8();
     let (w, h) = img.dimensions();
-    let byte_len = (w as usize)
-        .checked_mul(h as usize)?
-        .checked_mul(4)?;
+    let byte_len = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
 
     // Create a top-down 32bpp DIB section so we can copy pixels directly.
     let mut bmi = BITMAPINFO::default();
@@ -58,8 +52,7 @@ pub fn dynamic_image_to_hbitmap(
     };
 
     let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-    let hbitmap =
-        unsafe { CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok()? };
+    let hbitmap = unsafe { CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok()? };
     if bits.is_null() {
         return None;
     }

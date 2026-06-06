@@ -156,7 +156,11 @@ fn render_list(frame: &mut Frame, area: Rect, app: &App) {
 
         // Compute header offset for selection mapping:
         // 1 header always before pinned items; +1 header if selected is in history section
-        header_offset = if app.manager.selected < pinned_count { 1 } else { 2 };
+        header_offset = if app.manager.selected < pinned_count {
+            1
+        } else {
+            2
+        };
 
         for entry in app.manager.entries.iter().skip(pinned_count) {
             items.push(make_entry_item(entry));
