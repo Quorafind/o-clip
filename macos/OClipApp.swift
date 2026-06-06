@@ -4,7 +4,7 @@ import Foundation
 import SQLite3
 
 private let appName = "O-Clip"
-private let selfWriteType = NSPasteboard.PasteboardType("com.quorafind.oclip.self-write")
+private let selfWriteType = NSPasteboard.PasteboardType("com.boninall.oclip.self-write")
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 private let jsonDecoder = JSONDecoder()
 private let jsonEncoder = JSONEncoder()
