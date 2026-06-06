@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {
+  --bg: #1e1e2e;
+  --surface: #282840;
+  --border: #3a3a5c;
+  --text: #cdd6f4;
+  --dim: #6c7086;
+  --dim-bright: #a6adc8;
+  --accent: #89b4fa;
+  --highlight: #313244;
+  --pin: #f9e2af;
+  --bar-bg: #11111b;
+  --type-text: #89b4fa;
+  --type-url: #cba6f7;
+  --type-files: #a6e3a1;
+  --type-image: #f9e2af;
+  --success: #a6e3a1;
+  --danger: #f38ba8;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+  font-size: 13px;
+}
+
+/* ---- Title bar ---- */
+.title-bar {
+  background: var(--bar-bg);
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+.title-bar .app-name { font-weight: 700; color: #89dceb; font-size: 14px; }
+.title-bar .entry-count { color: var(--dim-bright); font-size: 12px; }
+.title-bar .ws-status {
+  margin-left: auto; font-size: 12px;
+  display: flex; align-items: center; gap: 4px;
+  -webkit-app-region: no-drag;
+}
+.ws-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.ws-dot.connected { background: var(--success); }
+.ws-dot.connecting { background: var(--pin); }
+.ws-dot.disconnected { background: var(--dim); }
+.autostart-toggle {
+  cursor: pointer; font-size: 10px; padding: 2px 6px;
+  border-radius: 4px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--dim);
+  -webkit-app-region: no-drag; transition: all 0.15s;
+  display: flex; align-items: center; gap: 3px;
+}
+.autostart-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.autostart-toggle.enabled { color: var(--success); border-color: var(--success); }
+
+/* ---- Search bar ---- */
+.search-bar {
+  background: var(--surface); padding: 6px 12px;
+  display: none; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.search-bar.active { display: flex; }
+.search-bar input {
+  width: 100%; background: var(--bg); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 4px;
+  padding: 4px 8px; font-size: 13px; outline: none; font-family: inherit;
+}
+
+/* ---- Main area ---- */
+.main { flex: 1; display: flex; overflow: hidden; min-height: 0; }
+
+/* ---- Virtual scroll list ---- */
+.list-pane {
+  width: 42%; border-right: 1px solid var(--border);
+  overflow-y: auto; flex-shrink: 0; position: relative;
+}
+.list-pane::-webkit-scrollbar { width: 6px; }
+.list-pane::-webkit-scrollbar-track { background: transparent; }
+.list-pane::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.vscroll-spacer { width: 100%; }
+.vscroll-content { position: absolute; left: 0; right: 0; }
+
+.section-header {
+  padding: 4px 10px; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.section-header.pinned-header { color: var(--pin); background: var(--bg); }
+.section-header.history-header { color: var(--dim-bright); background: var(--bg); }
+
+.entry {
+  padding: 5px 10px; cursor: pointer; display: flex;
+  align-items: center; gap: 4px; font-size: 12px;
+  white-space: nowrap; overflow: hidden;
+  border-left: 3px solid transparent; height: 28px;
+}
+.entry:hover { background: rgba(137,180,250,0.06); }
+.entry.selected { background: var(--highlight); border-left-color: var(--accent); }
+.entry .pin-icon { color: var(--pin); width: 14px; flex-shrink: 0; }
+.entry .time { color: var(--dim); font-size: 11px; font-family: 'Consolas','Menlo',monospace; flex-shrink: 0; }
+.entry .source { font-size: 10px; flex-shrink: 0; padding: 0 2px; border-radius: 2px; }
+.entry .source.remote { color: #89dceb; }
+.entry .source.local { color: var(--dim); }
+.entry .type-tag { font-size: 11px; flex-shrink: 0; font-family: 'Consolas','Menlo',monospace; }
+.entry .type-tag.text { color: var(--type-text); }
+.entry .type-tag.url { color: var(--type-url); }
+.entry .type-tag.files { color: var(--type-files); }
+.entry .type-tag.image { color: var(--type-image); }
+.entry .preview-text { overflow: hidden; text-overflow: ellipsis; color: var(--text); flex: 1; min-width: 0; }
+.empty-state {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; color: var(--dim); font-size: 14px;
+}
+
+/* ---- Preview pane ---- */
+.preview-pane { flex: 1; overflow-y: auto; padding: 12px; min-width: 0; }
+.preview-pane::-webkit-scrollbar { width: 6px; }
+.preview-pane::-webkit-scrollbar-track { background: transparent; }
+.preview-pane::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.preview-header { font-size: 11px; color: var(--dim); margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.preview-content { font-family: 'Consolas','Fira Code','Menlo',monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; line-height: 1.5; color: var(--text); }
+.preview-content .file-path { color: var(--type-files); }
+.preview-content .file-deleted { color: var(--danger); font-style: italic; }
+.preview-content .file-size { color: var(--dim); }
+.preview-content .hint { color: var(--dim); font-style: italic; margin-top: 8px; display: block; }
+.preview-image { max-width: 100%; max-height: 350px; object-fit: contain; border-radius: 4px; background: #000; }
+.preview-image-meta { font-size: 11px; color: var(--dim); margin-top: 6px; }
+.preview-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--dim); }
+
+/* ---- Status bar ---- */
+.status-bar {
+  background: var(--bar-bg); padding: 4px 12px;
+  display: flex; align-items: center; font-size: 11px;
+  flex-shrink: 0; border-top: 1px solid var(--border); gap: 8px;
+}
+.status-bar .status-msg { color: #89dceb; }
+.status-bar .keybinds { color: var(--dim); margin-left: auto; }
+kbd {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 3px; padding: 0 4px; font-size: 10px;
+  font-family: inherit; color: var(--dim-bright);
+}
+</style>
+</head>
+<body>
+
+<div class="title-bar">
+  <span class="app-name">o-clip</span>
+  <span class="entry-count" id="entry-count">0 entries</span>
+  <span class="ws-status" id="ws-status">
+    <span class="ws-dot disconnected" id="ws-dot"></span>
+    <span id="ws-text">Disconnected</span>
+  </span>
+  <span class="autostart-toggle" id="autostart-toggle" title="Toggle start on boot" onclick="toggleAutostart()">
+    <span id="autostart-icon">&#x26A1;</span>
+  </span>
+</div>
+
+<div class="search-bar" id="search-bar">
+  <input type="text" id="search-input" placeholder="Type to search..." autocomplete="off" spellcheck="false">
+</div>
+
+<div class="main">
+  <div class="list-pane" id="list-pane">
+    <div class="vscroll-spacer" id="vscroll-spacer"></div>
+    <div class="vscroll-content" id="vscroll-content"></div>
+  </div>
+  <div class="preview-pane" id="preview-pane">
+    <div class="preview-empty">Select an entry to preview</div>
+  </div>
+</div>
+
+<div class="status-bar">
+  <span class="status-msg" id="status-msg"></span>
+  <span class="keybinds" id="keybinds">
+    <kbd>↑↓</kbd> Nav <kbd>↵</kbd> Copy <kbd>d</kbd> Del <kbd>p</kbd> Pin
+    <kbd>/</kbd> Search <kbd>f</kbd> Fetch <kbd>r</kbd> Reconnect <kbd>Esc</kbd> Close
+  </span>
+</div>
+
+<script>
+// ---- Constants ----
+const ROW_H = 28;       // entry row height in px (matches CSS .entry height)
+const HEADER_H = 24;    // section header height
+const OVERSCAN = 5;     // extra rows rendered above/below viewport
+
+// ---- State ----
+let entries = [];        // flat list from Rust
+let displayList = [];    // [{type:'header'|'entry', ...}] with headers interleaved
+let selectedIndex = 0;   // index in entries[]
+let searchMode = false;
+let totalCount = 0;
+let statusTimeout = null;
+
+// ---- IPC ----
+function send(obj) { window.ipc.postMessage(JSON.stringify(obj)); }
+
+// ---- Virtual scroll state ----
+let lastRenderStart = -1;
+let lastRenderEnd = -1;
+
+function buildDisplayList() {
+  displayList = [];
+  const pinned = [];
+  const unpinned = [];
+  entries.forEach((e, i) => {
+    (e.pinned ? pinned : unpinned).push({ ...e, _idx: i });
+  });
+  if (pinned.length > 0) {
+    displayList.push({ type: 'header', text: 'Pinned', cls: 'pinned-header' });
+    pinned.forEach(e => displayList.push({ type: 'entry', entry: e, idx: e._idx }));
+    if (unpinned.length > 0) {
+      displayList.push({ type: 'header', text: 'History', cls: 'history-header' });
+    }
+  }
+  unpinned.forEach(e => displayList.push({ type: 'entry', entry: e, idx: e._idx }));
+}
+
+function getRowHeight(item) {
+  return item.type === 'header' ? HEADER_H : ROW_H;
+}
+
+function getTotalHeight() {
+  let h = 0;
+  for (const item of displayList) h += getRowHeight(item);
+  return h;
+}
+
+function renderVirtualList() {
+  const pane = document.getElementById('list-pane');
+  const spacer = document.getElementById('vscroll-spacer');
+  const content = document.getElementById('vscroll-content');
+
+  const totalH = getTotalHeight();
+  spacer.style.height = totalH + 'px';
+
+  if (displayList.length === 0) {
+    content.innerHTML = '<div class="empty-state">No clipboard entries</div>';
+    content.style.top = '0px';
+    lastRenderStart = -1;
+    lastRenderEnd = -1;
+    return;
+  }
+
+  const scrollTop = pane.scrollTop;
+  const viewH = pane.clientHeight;
+
+  // Find visible range.
+  let cumH = 0, startIdx = 0, endIdx = displayList.length;
+  for (let i = 0; i < displayList.length; i++) {
+    const rh = getRowHeight(displayList[i]);
+    if (cumH + rh > scrollTop) { startIdx = i; break; }
+    cumH += rh;
+  }
+  let topOffset = cumH;
+  cumH = topOffset;
+  for (let i = startIdx; i < displayList.length; i++) {
+    cumH += getRowHeight(displayList[i]);
+    if (cumH >= scrollTop + viewH) { endIdx = i + 1; break; }
+  }
+
+  // Add overscan.
+  startIdx = Math.max(0, startIdx - OVERSCAN);
+  endIdx = Math.min(displayList.length, endIdx + OVERSCAN);
+
+  // Recalculate topOffset for new startIdx.
+  topOffset = 0;
+  for (let i = 0; i < startIdx; i++) topOffset += getRowHeight(displayList[i]);
+
+  // Skip re-render if range unchanged.
+  if (startIdx === lastRenderStart && endIdx === lastRenderEnd) return;
+  lastRenderStart = startIdx;
+  lastRenderEnd = endIdx;
+
+  // Build DOM.
+  const frag = document.createDocumentFragment();
+  for (let i = startIdx; i < endIdx; i++) {
+    const item = displayList[i];
+    if (item.type === 'header') {
+      const el = document.createElement('div');
+      el.className = 'section-header ' + item.cls;
+      el.textContent = item.text;
+      el.style.height = HEADER_H + 'px';
+      frag.appendChild(el);
+    } else {
+      frag.appendChild(createEntryEl(item.entry, item.idx));
+    }
+  }
+
+  content.style.top = topOffset + 'px';
+  content.replaceChildren(frag);
+}
+
+function createEntryEl(entry, index) {
+  const el = document.createElement('div');
+  el.className = 'entry' + (index === selectedIndex ? ' selected' : '');
+  el.dataset.index = index;
+  el.style.height = ROW_H + 'px';
+
+  const time = new Date(entry.created_at);
+  const timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const srcCls = entry.source === 'remote' ? 'remote' : 'local';
+  const srcLabel = entry.source === 'remote' ? 'R' : 'L';
+  const typeMap = { text: 'T', url: 'U', files: 'F', image: 'I' };
+  const typeCls = entry.content_type;
+  const typeLabel = typeMap[entry.content_type] || '?';
+
+  el.innerHTML =
+    '<span class="pin-icon">' + (entry.pinned ? '\u2605' : '') + '</span>' +
+    '<span class="time">' + timeStr + '</span> ' +
+    '<span class="source ' + srcCls + '">' + srcLabel + '</span> ' +
+    '<span class="type-tag ' + typeCls + '">[' + typeLabel + ']</span> ' +
+    '<span class="preview-text">' + escHtml(entry.preview) + '</span>';
+
+  el.addEventListener('click', () => selectEntry(index));
+  el.addEventListener('dblclick', () => { selectEntry(index); copySelected(); });
+  return el;
+}
+
+// Scroll the selected entry into view.
+function scrollToSelected() {
+  // Find the displayList row for selectedIndex.
+  let offset = 0;
+  for (const item of displayList) {
+    if (item.type === 'entry' && item.idx === selectedIndex) break;
+    offset += getRowHeight(item);
+  }
+  const pane = document.getElementById('list-pane');
+  const rowBottom = offset + ROW_H;
+  if (offset < pane.scrollTop) {
+    pane.scrollTop = offset;
+  } else if (rowBottom > pane.scrollTop + pane.clientHeight) {
+    pane.scrollTop = rowBottom - pane.clientHeight;
+  }
+}
+
+// ---- Callbacks from Rust ----
+function onEntries(data) {
+  entries = data.entries || [];
+  totalCount = data.total || entries.length;
+  document.getElementById('entry-count').textContent = totalCount + ' entries';
+  if (data.ws_status) onWsStatus(data.ws_status);
+  if (selectedIndex >= entries.length) selectedIndex = Math.max(0, entries.length - 1);
+
+  buildDisplayList();
+  lastRenderStart = -1; lastRenderEnd = -1;
+  renderVirtualList();
+
+  if (entries.length > 0) {
+    requestAnimationFrame(() => {
+      send({ cmd: 'get_content', id: entries[selectedIndex].id });
+    });
+  } else {
+    renderPreviewEmpty();
+  }
+}
+
+function onNewEntry(data) {
+  totalCount = data.total || totalCount + 1;
+  document.getElementById('entry-count').textContent = totalCount + ' entries';
+  entries.unshift(data);
+  selectedIndex++;
+  buildDisplayList();
+  lastRenderStart = -1; lastRenderEnd = -1;
+  renderVirtualList();
+}
+
+function onShow() { send({ cmd: 'show' }); }
+
+function onContent(data) { renderPreview(data); }
+
+function onStatus(msg) {
+  const el = document.getElementById('status-msg');
+  el.textContent = msg;
+  clearTimeout(statusTimeout);
+  statusTimeout = setTimeout(() => { el.textContent = ''; }, 4000);
+}
+
+function onWsStatus(status) {
+  const dot = document.getElementById('ws-dot');
+  const text = document.getElementById('ws-text');
+  dot.className = 'ws-dot ' + status;
+  const labels = { connected: 'Connected', connecting: 'Connecting...', disconnected: 'Disconnected' };
+  text.textContent = labels[status] || status;
+}
+
+let autostartEnabled = false;
+function onAutostart(enabled) {
+  autostartEnabled = enabled;
+  const el = document.getElementById('autostart-toggle');
+  el.classList.toggle('enabled', enabled);
+  el.title = 'Start on boot: ' + (enabled ? 'ON' : 'OFF');
+}
+function toggleAutostart() { send({ cmd: 'toggle_autostart' }); }
+
+function onImageData(id, dataUrl) {
+  if (entries[selectedIndex] && entries[selectedIndex].id === id) {
+    const container = document.getElementById('image-container');
+    if (container) container.innerHTML = '<img class="preview-image" src="' + dataUrl + '">';
+  }
+}
+
+// ---- Preview rendering ----
+function renderPreview(data) {
+  const pane = document.getElementById('preview-pane');
+  const header = '<div class="preview-header">' + escHtml(data.content_type) + ' \u2014 ' + formatBytes(data.byte_size) + '</div>';
+
+  if (data.text !== undefined) {
+    pane.innerHTML = header + '<div class="preview-content">' + escHtml(data.text) + '</div>';
+  } else if (data.files) {
+    let html = header + '<div class="preview-content">';
+    data.files.forEach(f => {
+      html += '<span class="file-path">' + escHtml(f.path) + '</span>';
+      if (!f.exists) html += ' <span class="file-deleted">[DELETED]</span>';
+      html += '\n';
+    });
+    pane.innerHTML = html + '</div>';
+  } else if (data.synced_files) {
+    let html = header + '<div class="preview-content">' + data.synced_files.length + ' synced file(s):\n\n';
+    data.synced_files.forEach(f => {
+      html += '  <span class="file-path">' + escHtml(f.filename) + '</span> <span class="file-size">(' + formatBytes(f.size) + ')</span>\n';
+    });
+    pane.innerHTML = html + '\n<span class="hint">Press f to re-download</span></div>';
+  } else if (data.image) {
+    let html = header + '<div id="image-container">';
+    if (data.image.has_data) html += '<div class="preview-content" style="color:var(--dim)">Loading image...</div>';
+    html += '</div><div class="preview-image-meta">' +
+      data.image.width + 'x' + data.image.height + ' ' + data.image.format +
+      ' | ' + formatBytes(data.image.size) + ' | ' + data.image.bits_per_pixel + ' bpp</div>';
+    pane.innerHTML = html;
+    if (data.image.has_data) send({ cmd: 'get_image', id: data.id });
+  } else if (data.synced_image) {
+    let html = header + '<div class="preview-content">Synced Image:\n' +
+      '  Width: ' + data.synced_image.width + ' px\n  Height: ' + data.synced_image.height + ' px\n' +
+      '  Format: ' + data.synced_image.format + '\n  Size: ' + formatBytes(data.synced_image.size) + '\n' +
+      '  ID: ' + data.synced_image.image_id.substring(0, 16) + '...\n\n' +
+      '<span class="hint">Press f to re-download</span></div>';
+    pane.innerHTML = html;
+  } else {
+    renderPreviewEmpty();
+  }
+}
+
+function renderPreviewEmpty() {
+  document.getElementById('preview-pane').innerHTML = '<div class="preview-empty">Select an entry to preview</div>';
+}
+
+// ---- Actions ----
+let contentDebounce = null;
+function selectEntry(index) {
+  if (index < 0 || index >= entries.length) return;
+  selectedIndex = index;
+  // Force re-render to update highlight.
+  lastRenderStart = -1; lastRenderEnd = -1;
+  renderVirtualList();
+  scrollToSelected();
+  clearTimeout(contentDebounce);
+  contentDebounce = setTimeout(() => {
+    send({ cmd: 'get_content', id: entries[selectedIndex].id });
+  }, 30);
+}
+
+function selectPrev() { if (selectedIndex > 0) selectEntry(selectedIndex - 1); }
+function selectNext() { if (selectedIndex < entries.length - 1) selectEntry(selectedIndex + 1); }
+function selectFirst() { selectEntry(0); }
+function selectLast() { selectEntry(entries.length - 1); }
+
+function copySelected()    { if (entries.length) send({ cmd: 'copy', id: entries[selectedIndex].id }); }
+function deleteSelected()  { if (entries.length) send({ cmd: 'delete', id: entries[selectedIndex].id }); }
+function pinSelected()     { if (entries.length) send({ cmd: 'pin', id: entries[selectedIndex].id }); }
+function refetchSelected() { if (entries.length) send({ cmd: 'refetch', id: entries[selectedIndex].id }); }
+
+function enterSearch() {
+  searchMode = true;
+  document.getElementById('search-bar').classList.add('active');
+  const input = document.getElementById('search-input');
+  input.value = ''; input.focus();
+  updateKeybinds();
+}
+function exitSearch() {
+  searchMode = false;
+  document.getElementById('search-bar').classList.remove('active');
+  document.getElementById('search-input').value = '';
+  send({ cmd: 'clear_search' });
+  updateKeybinds();
+}
+function updateKeybinds() {
+  const el = document.getElementById('keybinds');
+  el.innerHTML = searchMode
+    ? '<kbd>Esc</kbd> Cancel  <kbd>\u21b5</kbd> Confirm  Type to search'
+    : '<kbd>\u2191\u2193</kbd> Nav <kbd>\u21b5</kbd> Copy <kbd>d</kbd> Del <kbd>p</kbd> Pin <kbd>/</kbd> Search <kbd>f</kbd> Fetch <kbd>r</kbd> Reconnect <kbd>Esc</kbd> Close';
+}
+
+// ---- Keyboard ----
+document.addEventListener('keydown', (e) => {
+  if (searchMode) {
+    if (e.key === 'Escape') { exitSearch(); e.preventDefault(); }
+    else if (e.key === 'Enter') { searchMode = false; document.getElementById('search-bar').classList.remove('active'); updateKeybinds(); e.preventDefault(); }
+    else if (e.key === 'ArrowDown') { selectNext(); e.preventDefault(); }
+    else if (e.key === 'ArrowUp') { selectPrev(); e.preventDefault(); }
+    return;
+  }
+  switch (e.key) {
+    case 'j': case 'ArrowDown': selectNext(); e.preventDefault(); break;
+    case 'k': case 'ArrowUp': selectPrev(); e.preventDefault(); break;
+    case 'g': selectFirst(); e.preventDefault(); break;
+    case 'G': selectLast(); e.preventDefault(); break;
+    case 'Enter': copySelected(); e.preventDefault(); break;
+    case 'd': deleteSelected(); e.preventDefault(); break;
+    case 'p': pinSelected(); e.preventDefault(); break;
+    case 'f': refetchSelected(); e.preventDefault(); break;
+    case '/': enterSearch(); e.preventDefault(); break;
+    case 'r': send({ cmd: 'reconnect' }); e.preventDefault(); break;
+    case 'Escape': send({ cmd: 'hide' }); e.preventDefault(); break;
+  }
+});
+
+document.getElementById('search-input').addEventListener('input', (e) => {
+  send({ cmd: 'search', query: e.target.value });
+});
+
+// ---- Helpers ----
+function escHtml(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+function formatBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+  return (b / 1073741824).toFixed(2) + ' GB';
+}
+
+// ---- Init ----
+document.addEventListener('DOMContentLoaded', () => {
+  send({ cmd: 'init' });
+  document.getElementById('list-pane').addEventListener('scroll', () => {
+    renderVirtualList();
+  });
+});
+</script>
+</body>
+</html>

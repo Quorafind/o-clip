@@ -140,13 +140,21 @@ impl FileTransferClient {
             }
         }
 
+        tracing::info!(
+            "uploading {} files to {}",
+            paths.len(),
+            url
+        );
+
         let resp = req
             .send()
             .await
             .map_err(|e| format!("upload failed: {e}"))?;
 
         if !resp.status().is_success() {
-            return Err(format!("upload failed with status: {}", resp.status()));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("upload failed with status {status}: {body}"));
         }
 
         let body: UploadResponse = resp
@@ -262,15 +270,25 @@ impl FileTransferClient {
             }
         }
 
+        tracing::info!(
+            "uploading image ({} bytes, {}x{}, {:?}) to {}",
+            data.len(),
+            info.width,
+            info.height,
+            info.format,
+            url
+        );
+
         let resp = req
             .send()
             .await
             .map_err(|e| format!("image upload failed: {e}"))?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
             return Err(format!(
-                "image upload failed with status: {}",
-                resp.status()
+                "image upload failed with status {status}: {body}"
             ));
         }
 

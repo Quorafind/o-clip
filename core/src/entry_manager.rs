@@ -41,6 +41,20 @@ impl EntryManager {
         }
     }
 
+    /// Create without loading entries (fast). Call `reload_entries()` later.
+    pub fn new_lazy(store: Store, max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            selected: 0,
+            search_query: String::new(),
+            ws_status: ConnectionStatus::Disconnected,
+            total_count: 0,
+            status_message: None,
+            store,
+            max_entries,
+        }
+    }
+
     /// Reload entries from the database (metadata only, content loaded on demand).
     pub fn reload_entries(&mut self) {
         if self.search_query.is_empty() {
@@ -193,6 +207,11 @@ impl EntryManager {
     #[allow(dead_code)]
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Max entries config.
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
     }
 }
 

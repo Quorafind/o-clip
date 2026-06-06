@@ -49,7 +49,21 @@ impl ClipboardMonitor {
                         }
                         last_seq = seq;
 
-                        match ClipboardGuard::open() {
+                        // Retry opening clipboard — the writer may still hold the lock
+                        // briefly after WM_CLIPBOARDUPDATE is delivered.
+                        let guard = {
+                            let mut result = ClipboardGuard::open();
+                            for _ in 0..5 {
+                                if result.is_ok() {
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                                result = ClipboardGuard::open();
+                            }
+                            result
+                        };
+
+                        match guard {
                             Ok(guard) => {
                                 // Check sensitivity before reading content
                                 let sensitivity = guard.check_sensitivity();
@@ -89,7 +103,7 @@ impl ClipboardMonitor {
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!("clipboard open failed (locked?): {e}");
+                                tracing::warn!("clipboard open failed after retries: {e}");
                             }
                         }
                         Some(LRESULT(0))

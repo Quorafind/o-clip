@@ -295,7 +295,7 @@ pub fn set_clipboard_image(info: &ImageInfo) -> bool {
     unsafe {
         let pasteboard: objc2::rc::Retained<objc2::runtime::AnyObject> =
             objc2::msg_send![objc2::class!(NSPasteboard), generalPasteboard];
-        let _: () = objc2::msg_send![&*pasteboard, clearContents];
+        let _: i64 = objc2::msg_send![&*pasteboard, clearContents];
 
         // Create NSData from PNG bytes.
         let nsdata: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![
@@ -373,7 +373,7 @@ pub fn set_clipboard_text(text: &str) -> bool {
     unsafe {
         let pasteboard: objc2::rc::Retained<objc2::runtime::AnyObject> =
             objc2::msg_send![objc2::class!(NSPasteboard), generalPasteboard];
-        let _: () = objc2::msg_send![&*pasteboard, clearContents];
+        let _: i64 = objc2::msg_send![&*pasteboard, clearContents];
 
         let cstr = match CString::new(text) {
             Ok(c) => c,

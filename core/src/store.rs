@@ -100,6 +100,8 @@ impl Store {
             let _ = std::fs::create_dir_all(parent);
         }
         let conn = Connection::open(path)?;
+        // Enable WAL for concurrent reads + writes from multiple connections.
+        conn.pragma_update(None, "journal_mode", "wal")?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
